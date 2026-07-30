@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react';
 import { API, safeFetch } from '../lib/utils';
 import { useClient } from '../lib/ClientContext';
-const PROVIDER_MODELS = { openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-4','gpt-3.5-turbo','o1-mini','o3-mini'], gemini: ['gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash','gemini-1.0-pro'], openrouter: [] };
+const PROVIDER_MODELS = { openai: ['gpt-4o','gpt-4o-mini','gpt-4-turbo','gpt-4','gpt-3.5-turbo','o1-mini','o3-mini'], gemini: ['gemini-2.0-flash','gemini-1.5-pro','gemini-1.5-flash','gemini-1.0-pro'], anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022'], openrouter: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet', 'google/gemini-1.5-flash', 'meta-llama/llama-3.1-8b-instruct', 'mistralai/mistral-nemo'] };
 
 export default function Businesses() {
   const [biz, setBiz] = useState(null);
@@ -86,8 +86,8 @@ export default function Businesses() {
           </>)}
           {tab==='ai-agent' && ai && (<>
             <div className="grid-2">
-              <div className="form-group"><label className="form-label">AI Provider</label><select className="form-select" value={ai.provider} onChange={e=>{const p=e.target.value;setAi({...ai,provider:p,model:p==='openai'?'gpt-4o-mini':p==='gemini'?'gemini-1.5-flash':''});setValidationStatus(null);}}><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="openrouter">OpenRouter</option></select></div>
-              <div className="form-group"><label className="form-label">AI Model</label>{ai.provider==='openrouter'?<input className="form-input" placeholder="e.g. openai/gpt-4o-mini" value={ai.model||''} onChange={e=>setAi({...ai,model:e.target.value})} />:<select className="form-select" value={ai.model} onChange={e=>setAi({...ai,model:e.target.value})}>{(PROVIDER_MODELS[ai.provider]||[]).map(m=><option key={m} value={m}>{m}</option>)}</select>}</div>
+              <div className="form-group"><label className="form-label">AI Provider</label><select className="form-select" value={ai.provider} onChange={e=>{const p=e.target.value;setAi({...ai,provider:p,model:p==='openai'?'gpt-4o-mini':p==='gemini'?'gemini-1.5-flash':p==='anthropic'?'claude-3-5-sonnet-20241022':''});setValidationStatus(null);}}><option value="openai">OpenAI</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option><option value="openrouter">OpenRouter</option></select></div>
+              <div className="form-group"><label className="form-label">AI Model</label><input className="form-input" list="ai-models-list" placeholder="Select or type a model..." value={ai.model||''} onChange={e=>setAi({...ai,model:e.target.value})} /><datalist id="ai-models-list">{(PROVIDER_MODELS[ai.provider]||[]).map(m=><option key={m} value={m} />)}</datalist></div>
             </div>
             <div className="form-group"><label className="form-label">API Key</label><div style={{ display: 'flex', gap: 10 }}><input className="form-input" type="password" placeholder="Enter your API key..." value={ai.api_key||''} onChange={e=>{setAi({...ai,api_key:e.target.value});setValidationStatus(null);}} style={{ flex:1 }} /><button className="btn btn-secondary" onClick={testConnection} disabled={validating||!ai?.api_key}>{validating?'⏳ Testing...':'🔌 Test Connection'}</button></div>
               {validationStatus && <div style={{ marginTop: 8, padding: '8px 12px', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600, background: validationStatus.valid?'rgba(16,185,129,0.1)':'rgba(239,68,68,0.1)', color: validationStatus.valid?'var(--success)':'var(--danger)', border: `1px solid ${validationStatus.valid?'rgba(16,185,129,0.2)':'rgba(239,68,68,0.2)'}` }}>{validationStatus.valid?'✅':'❌'} {validationStatus.message}</div>}

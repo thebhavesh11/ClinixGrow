@@ -544,6 +544,22 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
             logger.info(f"[Engine] AI reply generated ({len(reply)} chars)")
             return reply
 
+        elif provider == "anthropic":
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=ai_settings.api_key)
+            anthropic_messages = [{"role": m["role"], "content": m["content"]} for m in messages if m["role"] != "system"]
+            response = await client.messages.create(
+                model=model,
+                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                messages=anthropic_messages,
+                temperature=ai_settings.temperature,
+                max_tokens=ai_settings.max_tokens,
+            )
+            reply = response.content[0].text.strip()
+            reply = _clean_ai_reply(reply)
+            logger.info(f"[Engine] AI reply generated ({len(reply)} chars)")
+            return reply
+
         elif provider == "gemini":
             import google.generativeai as genai
             genai.configure(api_key=ai_settings.api_key)
@@ -626,6 +642,17 @@ Conversation:
                 max_tokens=100,
             )
             text = response.choices[0].message.content.strip()
+
+        elif provider == "anthropic":
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=ai_settings.api_key)
+            response = await client.messages.create(
+                model=model,
+                messages=[{"role": "user", "content": scoring_prompt}],
+                temperature=0.3,
+                max_tokens=100,
+            )
+            text = response.content[0].text.strip()
 
         elif provider == "gemini":
             import google.generativeai as genai

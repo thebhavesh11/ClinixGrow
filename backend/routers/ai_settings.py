@@ -87,6 +87,16 @@ async def validate_api_key(data: ValidateKeyRequest):
             response = model.generate_content("Hi", generation_config=genai.GenerationConfig(max_output_tokens=5))
             return ValidateKeyResponse(valid=True, message=f"Connected! Model: {data.model or 'gemini-1.5-flash'}")
 
+        elif provider == "anthropic":
+            from anthropic import AsyncAnthropic
+            client = AsyncAnthropic(api_key=api_key)
+            response = await client.messages.create(
+                model=data.model or "claude-3-5-sonnet-20241022",
+                messages=[{"role": "user", "content": "Hi"}],
+                max_tokens=5,
+            )
+            return ValidateKeyResponse(valid=True, message=f"Connected! Model: {data.model or 'claude-3-5-sonnet-20241022'}")
+
         elif provider == "openrouter":
             from openai import AsyncOpenAI
             client = AsyncOpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
