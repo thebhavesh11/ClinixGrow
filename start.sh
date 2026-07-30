@@ -50,7 +50,11 @@ sleep 2
 # Start Frontend (Next.js)
 echo "[4/4] Starting Frontend (port 3000)..."
 cd "$SCRIPT_DIR/frontend"
-npx next dev &
+if [ ! -d ".next" ]; then
+    echo "Building Next.js frontend for production (this takes a minute)..."
+    npm run build
+fi
+npx next start -p 3000 &
 FRONTEND_PID=$!
 sleep 3
 
