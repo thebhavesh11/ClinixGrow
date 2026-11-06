@@ -25,15 +25,23 @@ from routers import business, ai_settings, leads, conversations, dashboard, what
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Create tables on startup, migrate columns, and seed defaults."""
-    from database import async_session
+    from database import async_session, DB_PATH
     from sqlalchemy import select, text
     import secrets
+    import sqlite3
     from models import Business, AISetting, WorkingHours, VoiceSettings
+
+    # Set SQLite WAL mode and busy timeout via standard sqlite3 before connection pool starts
+    try:
+        s_conn = sqlite3.connect(DB_PATH)
+        s_conn.execute("PRAGMA journal_mode=WAL;")
+        s_conn.execute("PRAGMA busy_timeout=10000;")
+        s_conn.close()
+    except Exception as wal_err:
+        logger.warning(f"SQLite WAL mode warning: {wal_err}")
 
     try:
         async with engine.begin() as conn:
-            await conn.execute(text("PRAGMA journal_mode=WAL;"))
-            await conn.execute(text("PRAGMA busy_timeout=10000;"))
             await conn.run_sync(Base.metadata.create_all)
             # Ensure missing columns exist in SQLite tables across versions
             try:
