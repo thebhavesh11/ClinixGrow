@@ -35,72 +35,144 @@ async def lifespan(app: FastAPI):
             await conn.run_sync(Base.metadata.create_all)
             # Ensure missing columns exist in SQLite tables across versions
             try:
-                # 1. Businesses table columns
-                res = await conn.execute(text("PRAGMA table_info(businesses)"))
-                b_cols = [row[1] for row in res.fetchall()]
-                if "portal_token" not in b_cols:
-                    await conn.execute(text("ALTER TABLE businesses ADD COLUMN portal_token VARCHAR(64)"))
-                    logger.info("Migrated: added portal_token to businesses")
-                if "portal_pin" not in b_cols:
-                    await conn.execute(text("ALTER TABLE businesses ADD COLUMN portal_pin VARCHAR(20)"))
-                    logger.info("Migrated: added portal_pin to businesses")
-                if "logo_url" not in b_cols:
-                    await conn.execute(text("ALTER TABLE businesses ADD COLUMN logo_url VARCHAR(500) DEFAULT ''"))
-                    logger.info("Migrated: added logo_url to businesses")
+                # Comprehensive Schema Migrations for all SQLite tables
+                schema_migrations = {
+                    "businesses": [
+                        ("industry", "VARCHAR(100) DEFAULT ''"),
+                        ("services", "TEXT DEFAULT ''"),
+                        ("pricing", "TEXT DEFAULT ''"),
+                        ("faqs", "TEXT DEFAULT ''"),
+                        ("location", "VARCHAR(255) DEFAULT ''"),
+                        ("offers", "TEXT DEFAULT ''"),
+                        ("working_hours", "VARCHAR(255) DEFAULT ''"),
+                        ("portal_token", "VARCHAR(64)"),
+                        ("portal_pin", "VARCHAR(20)"),
+                        ("logo_url", "VARCHAR(500) DEFAULT ''"),
+                    ],
+                    "leads": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("lead_score", "INTEGER DEFAULT 0"),
+                        ("lead_status", "VARCHAR(20) DEFAULT 'new'"),
+                    ],
+                    "conversations": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                    ],
+                    "messages": [
+                        ("sender_type", "VARCHAR(10) DEFAULT 'customer'"),
+                        ("message_text", "TEXT DEFAULT ''"),
+                    ],
+                    "ai_settings": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("provider", "VARCHAR(50) DEFAULT 'openai'"),
+                        ("api_key", "VARCHAR(500) DEFAULT ''"),
+                        ("model", "VARCHAR(100) DEFAULT 'gpt-4o-mini'"),
+                        ("temperature", "FLOAT DEFAULT 0.7"),
+                        ("max_tokens", "INTEGER DEFAULT 500"),
+                        ("system_prompt", "TEXT DEFAULT ''"),
+                        ("scoring_prompt", "TEXT DEFAULT ''"),
+                        ("group_replies", "INTEGER DEFAULT 0"),
+                        ("reply_delay", "INTEGER DEFAULT 0"),
+                        ("typing_indicator", "INTEGER DEFAULT 0"),
+                        ("reply_to_contacts", "INTEGER DEFAULT 1"),
+                        ("auto_handover", "INTEGER DEFAULT 0"),
+                        ("handover_after", "INTEGER DEFAULT 10"),
+                        ("reminder_enabled", "INTEGER DEFAULT 0"),
+                        ("reminder_time_mins", "INTEGER DEFAULT 30"),
+                        ("reminder_message_template", "TEXT DEFAULT 'Hi {name}, this is a reminder for your appointment at {time}.'"),
+                        ("feedback_enabled", "INTEGER DEFAULT 0"),
+                        ("feedback_time_mins", "INTEGER DEFAULT 120"),
+                        ("feedback_message_template", "TEXT DEFAULT 'Hi {name}, thank you for your visit! Please share your feedback: [Link]'"),
+                        ("wa_connection_mode", "VARCHAR(20) DEFAULT 'qr'"),
+                        ("wa_app_id", "VARCHAR(100) DEFAULT ''"),
+                        ("wa_app_secret", "VARCHAR(255) DEFAULT ''"),
+                        ("wa_phone_number_id", "VARCHAR(100) DEFAULT ''"),
+                        ("wa_access_token", "VARCHAR(500) DEFAULT ''"),
+                        ("wa_verify_token", "VARCHAR(100) DEFAULT ''"),
+                        ("wa_business_account_id", "VARCHAR(100) DEFAULT ''"),
+                    ],
+                    "appointments": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("lead_id", "INTEGER"),
+                        ("title", "VARCHAR(255) DEFAULT 'Appointment'"),
+                        ("notes", "TEXT DEFAULT ''"),
+                        ("booked_by", "VARCHAR(20) DEFAULT 'manual'"),
+                        ("reminder_sent", "INTEGER DEFAULT 0"),
+                        ("feedback_sent", "INTEGER DEFAULT 0"),
+                        ("status", "VARCHAR(20) DEFAULT 'confirmed'"),
+                    ],
+                    "working_hours": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("break_start", "VARCHAR(5) DEFAULT ''"),
+                        ("break_end", "VARCHAR(5) DEFAULT ''"),
+                        ("slot_duration", "INTEGER DEFAULT 30"),
+                        ("is_open", "INTEGER DEFAULT 1"),
+                    ],
+                    "business_media": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("name", "VARCHAR(255) DEFAULT ''"),
+                        ("description", "TEXT DEFAULT ''"),
+                        ("file_type", "VARCHAR(20) DEFAULT 'image'"),
+                        ("file_path", "VARCHAR(500) DEFAULT ''"),
+                        ("original_filename", "VARCHAR(255) DEFAULT ''"),
+                    ],
+                    "voice_settings": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("vapi_api_key", "VARCHAR(500) DEFAULT ''"),
+                        ("vapi_assistant_id", "VARCHAR(100) DEFAULT ''"),
+                        ("vapi_phone_id", "VARCHAR(100) DEFAULT ''"),
+                        ("phone_number", "VARCHAR(20) DEFAULT ''"),
+                        ("agent_name", "VARCHAR(255) DEFAULT 'AI Assistant'"),
+                        ("voice_provider", "VARCHAR(50) DEFAULT '11labs'"),
+                        ("voice_id", "VARCHAR(100) DEFAULT ''"),
+                        ("language", "VARCHAR(10) DEFAULT 'hi-IN'"),
+                        ("first_message", "TEXT DEFAULT 'Hello! How can I help you today?'"),
+                        ("system_prompt", "TEXT DEFAULT ''"),
+                        ("can_book_appointments", "INTEGER DEFAULT 1"),
+                        ("can_transfer_call", "INTEGER DEFAULT 1"),
+                        ("webhook_secret", "VARCHAR(100) DEFAULT ''"),
+                        ("is_active", "INTEGER DEFAULT 0"),
+                    ],
+                    "call_logs": [
+                        ("business_id", "INTEGER DEFAULT 1"),
+                        ("lead_id", "INTEGER"),
+                        ("vapi_call_id", "VARCHAR(100) DEFAULT ''"),
+                        ("phone_number", "VARCHAR(20) DEFAULT ''"),
+                        ("direction", "VARCHAR(10) DEFAULT 'inbound'"),
+                        ("status", "VARCHAR(20) DEFAULT 'queued'"),
+                        ("duration_seconds", "INTEGER DEFAULT 0"),
+                        ("cost", "FLOAT DEFAULT 0.0"),
+                        ("recording_url", "VARCHAR(500) DEFAULT ''"),
+                        ("transcript", "TEXT DEFAULT ''"),
+                        ("summary", "TEXT DEFAULT ''"),
+                        ("ended_reason", "VARCHAR(50) DEFAULT ''"),
+                        ("appointments_booked", "INTEGER DEFAULT 0"),
+                    ],
+                }
 
-                # 2. AI Settings table columns
-                res = await conn.execute(text("PRAGMA table_info(ai_settings)"))
-                ai_cols = [row[1] for row in res.fetchall()]
-                ai_migrations = [
-                    ("reminder_enabled", "INTEGER DEFAULT 0"),
-                    ("reminder_time_mins", "INTEGER DEFAULT 30"),
-                    ("reminder_message_template", "TEXT DEFAULT 'Hi {name}, this is a reminder for your appointment at {time}.'"),
-                    ("feedback_enabled", "INTEGER DEFAULT 0"),
-                    ("feedback_time_mins", "INTEGER DEFAULT 120"),
-                    ("feedback_message_template", "TEXT DEFAULT 'Hi {name}, thank you for your visit! Please share your feedback: [Link]'"),
-                    ("wa_connection_mode", "VARCHAR(20) DEFAULT 'qr'"),
-                    ("wa_app_id", "VARCHAR(100) DEFAULT ''"),
-                    ("wa_app_secret", "VARCHAR(255) DEFAULT ''"),
-                    ("wa_phone_number_id", "VARCHAR(100) DEFAULT ''"),
-                    ("wa_access_token", "VARCHAR(500) DEFAULT ''"),
-                    ("wa_verify_token", "VARCHAR(100) DEFAULT ''"),
-                    ("wa_business_account_id", "VARCHAR(100) DEFAULT ''"),
-                    ("group_replies", "INTEGER DEFAULT 0"),
-                    ("reply_delay", "INTEGER DEFAULT 0"),
-                    ("typing_indicator", "INTEGER DEFAULT 0"),
-                    ("reply_to_contacts", "INTEGER DEFAULT 1"),
-                    ("auto_handover", "INTEGER DEFAULT 0"),
-                    ("handover_after", "INTEGER DEFAULT 10"),
-                    ("scoring_prompt", "TEXT DEFAULT ''"),
-                ]
-                for col_name, col_def in ai_migrations:
-                    if col_name not in ai_cols:
-                        await conn.execute(text(f"ALTER TABLE ai_settings ADD COLUMN {col_name} {col_def}"))
-                        logger.info(f"Migrated: added {col_name} to ai_settings")
+                for tbl_name, cols in schema_migrations.items():
+                    try:
+                        res = await conn.execute(text(f"PRAGMA table_info({tbl_name})"))
+                        existing_cols = {row[1] for row in res.fetchall()}
+                        if existing_cols:
+                            for col_name, col_def in cols:
+                                if col_name not in existing_cols:
+                                    await conn.execute(text(f"ALTER TABLE {tbl_name} ADD COLUMN {col_name} {col_def}"))
+                                    logger.info(f"Migrated: added {col_name} to {tbl_name}")
+                    except Exception as tbl_err:
+                        logger.warning(f"Column migration warning for {tbl_name}: {tbl_err}")
 
-                # 3. Multi-client tenant business_id checks
-                for tbl in ["leads", "conversations", "appointments", "working_hours"]:
-                    res = await conn.execute(text(f"PRAGMA table_info({tbl})"))
-                    tbl_cols = [row[1] for row in res.fetchall()]
-                    if tbl_cols and "business_id" not in tbl_cols:
-                        await conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN business_id INTEGER DEFAULT 1"))
-                        logger.info(f"Migrated: added business_id to {tbl}")
-
-                # 4. Clean up duplicate empty "My Business" records caused by crash-restart loops
-                await conn.execute(text("""
-                    DELETE FROM ai_settings WHERE business_id IN (
-                        SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
-                        AND id NOT IN (SELECT business_id FROM leads)
-                        AND id NOT IN (SELECT business_id FROM conversations)
-                    )
-                """))
-                await conn.execute(text("""
-                    DELETE FROM working_hours WHERE business_id IN (
-                        SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
-                        AND id NOT IN (SELECT business_id FROM leads)
-                        AND id NOT IN (SELECT business_id FROM conversations)
-                    )
-                """))
+                # Clean up duplicate empty "My Business" records caused by crash-restart loops
+                for tbl_with_biz in ["ai_settings", "working_hours", "voice_settings"]:
+                    try:
+                        await conn.execute(text(f"""
+                            DELETE FROM {tbl_with_biz} WHERE business_id IN (
+                                SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
+                                AND id NOT IN (SELECT business_id FROM leads)
+                                AND id NOT IN (SELECT business_id FROM conversations)
+                            )
+                        """))
+                    except Exception:
+                        pass
                 cleanup_res = await conn.execute(text("""
                     DELETE FROM businesses WHERE name = 'My Business' AND id > 1
                     AND id NOT IN (SELECT business_id FROM leads)
