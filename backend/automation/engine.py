@@ -315,6 +315,60 @@ async def _process_message_inner(
     return {"reply": clean_reply, "lead_id": lead.id}
 
 
+async def record_outgoing_human_message(
+    phone: str,
+    message: str,
+    name: str = "Unknown",
+    business_id: int = 1,
+    db: AsyncSession = None,
+) -> dict:
+    """Record an outgoing message sent manually by the user from their WhatsApp phone/web."""
+    if not message or not str(message).strip():
+        return {"skipped": True}
+
+    async with _get_phone_lock(phone):
+        # 1. Find or create lead (scoped to business)
+        result = await db.execute(
+            select(Lead).where(Lead.phone_number == phone, Lead.business_id == business_id)
+        )
+        lead = result.scalar_one_or_none()
+        if not lead:
+            lead = Lead(phone_number=phone, name=name or "Unknown", business_id=business_id)
+            db.add(lead)
+            await db.flush()
+            await db.refresh(lead)
+            logger.info(f"[Engine] Created new lead for outgoing WhatsApp message: {lead.name} ({lead.phone_number})")
+        elif name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+            lead.name = name
+            await db.flush()
+
+        # 2. Find or create conversation
+        result = await db.execute(
+            select(Conversation).where(
+                Conversation.lead_id == lead.id,
+                Conversation.business_id == business_id,
+            )
+        )
+        conv = result.scalar_one_or_none()
+        if not conv:
+            conv = Conversation(lead_id=lead.id, business_id=business_id)
+            db.add(conv)
+            await db.flush()
+            await db.refresh(conv)
+
+        # 3. Save message with sender_type="human" so it appears as "👤 You" in dashboard
+        human_msg = Message(
+            conversation_id=conv.id,
+            sender_type="human",
+            message_text=message.strip(),
+        )
+        db.add(human_msg)
+        await db.flush()
+
+        logger.info(f"[Engine] Recorded manual WhatsApp message from owner to {phone} (conv={conv.id})")
+        return {"lead_id": lead.id, "conversation_id": conv.id, "message_id": human_msg.id}
+
+
 async def _build_appointment_context(db: AsyncSession, business_id: int, lead_id: int) -> str:
     """Build appointment context string for AI system prompt."""
     from routers.appointments import _generate_slots

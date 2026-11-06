@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from database import get_db
-from schemas import WhatsAppWebhook
+from schemas import WhatsAppWebhook, WhatsAppOutgoingWebhook
 from models import AISetting
 import httpx
 
@@ -248,6 +248,26 @@ async def webhook(data: WhatsAppWebhook, db: AsyncSession = Depends(get_db)):
         return {"status": "processed", "result": result}
     except Exception as e:
         logger.error(f"[Webhook] Error processing message from {data.phone}: {type(e).__name__}: {e}", exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
+@router.post("/outgoing-webhook")
+async def outgoing_webhook(data: WhatsAppOutgoingWebhook, db: AsyncSession = Depends(get_db)):
+    """Receive outgoing messages sent by the business owner directly from their WhatsApp phone/web."""
+    target_biz_id = data.business_id if (data.business_id and data.business_id > 0) else _active_business_id
+    logger.info(f"[OutgoingWebhook] Business {target_biz_id} owner sent message to {data.phone}: {data.message[:50]}...")
+    try:
+        from automation.engine import record_outgoing_human_message
+        result = await record_outgoing_human_message(
+            phone=data.phone,
+            message=data.message,
+            name=data.name or "Unknown",
+            business_id=target_biz_id,
+            db=db,
+        )
+        return {"status": "recorded", "result": result}
+    except Exception as e:
+        logger.error(f"[OutgoingWebhook] Error saving message to {data.phone}: {type(e).__name__}: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
 
 

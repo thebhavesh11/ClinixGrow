@@ -199,6 +199,14 @@ class WhatsAppWebhook(BaseModel):
     should_reply: bool = True
 
 
+class WhatsAppOutgoingWebhook(BaseModel):
+    phone: str
+    message: str
+    name: Optional[str] = "Unknown"
+    business_id: int = 1
+    is_group: bool = False
+
+
 # ── Working Hours ─────────────────────────────────────────
 class WorkingHoursItem(BaseModel):
     day_of_week: int  # 0=Monday ... 6=Sunday

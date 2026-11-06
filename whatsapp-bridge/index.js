@@ -133,6 +133,48 @@ process.on('uncaughtException', (err) => {
     console.error('[Bridge] Uncaught Exception:', err.message);
 });
 
+// ── Track messages sent by bot / API to avoid duplicate processing in message_create ──
+const outgoingBotMessageIds = new Set();
+const recentBotSends = [];
+
+function trackBotMessageId(msgId) {
+    if (!msgId) return;
+    outgoingBotMessageIds.add(msgId);
+    setTimeout(() => {
+        outgoingBotMessageIds.delete(msgId);
+    }, 120000); // 2 min TTL
+}
+
+function trackBotSend(phone, text) {
+    const item = {
+        phone: String(phone || '').replace(/\D/g, ''),
+        text: (text || '').trim(),
+        time: Date.now(),
+    };
+    recentBotSends.push(item);
+    setTimeout(() => {
+        const idx = recentBotSends.indexOf(item);
+        if (idx !== -1) recentBotSends.splice(idx, 1);
+    }, 45000); // 45s TTL
+}
+
+function isRecentBotSend(phone, text) {
+    const cleanP = String(phone || '').replace(/\D/g, '');
+    const cleanT = (text || '').trim();
+    const now = Date.now();
+    const matchIdx = recentBotSends.findIndex(s => {
+        const textMatches = (s.text && cleanT && (s.text === cleanT || cleanT.startsWith(s.text.substring(0, 30)) || s.text.startsWith(cleanT.substring(0, 30))));
+        const timeValid = (now - s.time) < 40000;
+        const phoneMatches = !cleanP || !s.phone || cleanP.includes(s.phone) || s.phone.includes(cleanP);
+        return textMatches && timeValid && phoneMatches;
+    });
+    if (matchIdx !== -1) {
+        recentBotSends.splice(matchIdx, 1);
+        return true;
+    }
+    return false;
+}
+
 // ── Session Creation & Lifecycle ────────────────────────────────────
 function createClient(businessId) {
     const id = parseInt(businessId) || 1;
@@ -320,7 +362,8 @@ function initSession(businessId) {
             if (msgTime < (BRIDGE_BOOT_TIME - 180)) return;
 
             // Live message check
-            const isLiveMessage = Boolean(session.isConnected && session.readyTimestamp && (msgTime >= (session.readyTimestamp - 2)));
+            const readyTime = session.readyTimestamp || BRIDGE_BOOT_TIME;
+            const isLiveMessage = Boolean(session.isConnected && (msgTime >= (readyTime - 10)));
 
             // Fetch AI settings for this specific business
             const settings = await getCachedSettings(session.businessId);
@@ -394,6 +437,79 @@ function initSession(businessId) {
             }, { timeout: 30000 });
         } catch (err) {
             console.error(`[Bridge-Biz-${session.businessId}] Message handler error:`, err.message);
+        }
+    });
+
+    client.on('message_create', async (msg) => {
+        try {
+            // Only process outgoing messages sent by the owner/phone here.
+            // Incoming messages from other people are handled by client.on('message')
+            if (!msg.fromMe) return;
+
+            // If this message was sent by our bridge / bot, skip it (already saved in DB)
+            if (msg.id?._serialized && outgoingBotMessageIds.has(msg.id._serialized)) {
+                outgoingBotMessageIds.delete(msg.id._serialized);
+                return;
+            }
+
+            const bodyText = (msg.body || '').trim();
+            const recipient = msg.to || '';
+
+            // Skip status broadcasts, newsletters
+            if (!recipient || recipient === 'status@broadcast' || recipient.includes('@broadcast') || recipient.includes('@newsletter')) return;
+            if (msg.isStatus) return;
+
+            const IGNORED_TYPES = ['e2e_notification', 'notification', 'notification_template', 'protocol', 'call_log', 'gp2', 'ciphertext'];
+            if (IGNORED_TYPES.includes(msg.type)) return;
+
+            if (!bodyText && !msg.hasMedia) return;
+
+            // Check if recently sent by bot
+            if (isRecentBotSend(recipient, bodyText)) {
+                return;
+            }
+
+            const msgTime = msg.timestamp || Math.floor(Date.now() / 1000);
+            const readyTime = session.readyTimestamp || BRIDGE_BOOT_TIME;
+            // Only capture messages sent after the bridge is ready or within the last 60 seconds
+            if (msgTime < (readyTime - 15) && msgTime < (BRIDGE_BOOT_TIME - 60)) return;
+
+            const isGroup = recipient.includes('@g.us');
+            let phone = recipient.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
+            let name = 'Unknown';
+
+            try {
+                const contact = await msg.getContact();
+                if (contact) {
+                    name = contact.pushname || contact.name || contact.verifiedName || contact.shortName || 'Unknown';
+                    if (contact.number) {
+                        phone = contact.number;
+                    } else if (contact.id?.user && !contact.id._serialized.includes('@lid')) {
+                        phone = contact.id.user;
+                    }
+                }
+            } catch (_) {}
+
+            if (isGroup) {
+                try {
+                    const chat = await msg.getChat();
+                    if (chat && chat.name) name = chat.name;
+                } catch (_) {}
+            }
+
+            const outgoingText = bodyText || `[${msg.type || 'media'} sent]`;
+            console.log(`[Bridge-Biz-${session.businessId}] Owner sent message from WhatsApp to ${name} (${phone}): "${outgoingText.substring(0, 45)}"`);
+
+            // Forward to backend to save as 'human' message
+            await axios.post(`${BACKEND_URL}/api/whatsapp/outgoing-webhook`, {
+                phone: isGroup ? recipient : phone,
+                message: outgoingText,
+                name: name,
+                business_id: session.businessId,
+                is_group: isGroup,
+            }, { timeout: 15000 });
+        } catch (err) {
+            console.error(`[Bridge-Biz-${session.businessId}] message_create error:`, err.message);
         }
     });
 
@@ -573,10 +689,12 @@ app.post('/send', async (req, res) => {
 
     try {
         let chatId = String(phone).trim();
+        trackBotSend(chatId, message);
 
         // 1. If it already has domain (@c.us, @g.us, or @lid), send directly
         if (chatId.includes('@')) {
-            await session.client.sendMessage(chatId, message);
+            const sentMsg = await session.client.sendMessage(chatId, message);
+            if (sentMsg?.id?._serialized) trackBotMessageId(sentMsg.id._serialized);
             console.log(`[Bridge-Biz-${bid}] Sent directly to ${chatId}`);
             return res.json({ success: true, target: chatId });
         }
@@ -586,6 +704,7 @@ app.post('/send', async (req, res) => {
         if (!cleanPhone) {
             return res.status(400).json({ success: false, error: 'Invalid phone number format' });
         }
+        trackBotSend(cleanPhone, message);
 
         // 3. Resolve registered WhatsApp ID via getNumberId
         try {
@@ -599,7 +718,8 @@ app.post('/send', async (req, res) => {
             chatId = `${cleanPhone}@c.us`;
         }
 
-        await session.client.sendMessage(chatId, message);
+        const sentMsg = await session.client.sendMessage(chatId, message);
+        if (sentMsg?.id?._serialized) trackBotMessageId(sentMsg.id._serialized);
         console.log(`[Bridge-Biz-${bid}] Successfully sent to ${chatId}`);
         res.json({ success: true, target: chatId });
     } catch (err) {
@@ -631,7 +751,9 @@ app.post('/send-media', async (req, res) => {
 
         const media = new MessageMedia(mimetype, base64, filename || 'file');
         let chatId = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
-        await session.client.sendMessage(chatId, media, { caption: caption || '' });
+        trackBotSend(chatId, caption || filename || '');
+        const sentMsg = await session.client.sendMessage(chatId, media, { caption: caption || '' });
+        if (sentMsg?.id?._serialized) trackBotMessageId(sentMsg.id._serialized);
         console.log(`[Bridge-Biz-${bid}] Sent media to ${chatId}: ${filename}`);
         res.json({ success: true });
     } catch (err) {
