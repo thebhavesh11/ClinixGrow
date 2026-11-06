@@ -85,18 +85,40 @@ async def lifespan(app: FastAPI):
                     if tbl_cols and "business_id" not in tbl_cols:
                         await conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN business_id INTEGER DEFAULT 1"))
                         logger.info(f"Migrated: added business_id to {tbl}")
+
+                # 4. Clean up duplicate empty "My Business" records caused by crash-restart loops
+                await conn.execute(text("""
+                    DELETE FROM ai_settings WHERE business_id IN (
+                        SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
+                        AND id NOT IN (SELECT business_id FROM leads)
+                        AND id NOT IN (SELECT business_id FROM conversations)
+                    )
+                """))
+                await conn.execute(text("""
+                    DELETE FROM working_hours WHERE business_id IN (
+                        SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
+                        AND id NOT IN (SELECT business_id FROM leads)
+                        AND id NOT IN (SELECT business_id FROM conversations)
+                    )
+                """))
+                cleanup_res = await conn.execute(text("""
+                    DELETE FROM businesses WHERE name = 'My Business' AND id > 1
+                    AND id NOT IN (SELECT business_id FROM leads)
+                    AND id NOT IN (SELECT business_id FROM conversations)
+                """))
+                if cleanup_res.rowcount > 0:
+                    logger.info(f"Cleaned up {cleanup_res.rowcount} duplicate empty 'My Business' records")
             except Exception as mig_err:
                 logger.warning(f"Column migration check warning: {mig_err}")
 
         logger.info("Database tables created/verified")
 
-        # Seed default business & AI settings if not exists
+        # Seed default business & AI settings ONLY if database has NO businesses at all
         async with async_session() as session:
             async with session.begin():
-                result = await session.execute(select(Business).where(Business.id == 1))
-                biz1 = result.scalar_one_or_none()
-                if not biz1:
-                    session.add(Business(name="My Business", portal_token=f"portal_{secrets.token_urlsafe(16)}"))
+                any_biz = (await session.execute(select(Business))).scalars().first()
+                if not any_biz:
+                    session.add(Business(id=1, name="My Business", portal_token=f"portal_{secrets.token_urlsafe(16)}"))
                     await session.flush()
                     logger.info("Seeded default business profile")
 
@@ -106,10 +128,13 @@ async def lifespan(app: FastAPI):
                     if not b.portal_token:
                         b.portal_token = f"portal_{secrets.token_urlsafe(16)}"
                         logger.info(f"Generated portal_token for {b.name}: {b.portal_token}")
-                result = await session.execute(select(AISetting).where(AISetting.business_id == 1))
-                if not result.scalar_one_or_none():
-                    session.add(AISetting(business_id=1))
-                    logger.info("Seeded default AI settings")
+
+                # Ensure each business has AI settings
+                for b in all_bizs:
+                    ai_r = await session.execute(select(AISetting).where(AISetting.business_id == b.id))
+                    if not ai_r.scalar_one_or_none():
+                        session.add(AISetting(business_id=b.id))
+                        logger.info(f"Seeded default AI settings for business {b.id}")
 
                 # Seed default working hours if not exist
                 result = await session.execute(select(WorkingHours).where(WorkingHours.business_id == 1))
