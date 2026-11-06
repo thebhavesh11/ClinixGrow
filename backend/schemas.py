@@ -191,6 +191,7 @@ class BusinessMediaUpdate(BaseModel):
 # ── WhatsApp Webhook ─────────────────────────────────────
 class WhatsAppWebhook(BaseModel):
     phone: str
+    alt_phone: Optional[str] = None
     message: str
     name: Optional[str] = "Unknown"
     business_id: int = 1
@@ -201,6 +202,7 @@ class WhatsAppWebhook(BaseModel):
 
 class WhatsAppOutgoingWebhook(BaseModel):
     phone: str
+    alt_phone: Optional[str] = None
     message: str
     name: Optional[str] = "Unknown"
     business_id: int = 1
@@ -209,6 +211,7 @@ class WhatsAppOutgoingWebhook(BaseModel):
 
 class ChatSyncItem(BaseModel):
     phone: str
+    alt_phone: Optional[str] = None
     name: Optional[str] = "Unknown"
     business_id: Optional[int] = 1
     is_group: Optional[bool] = False

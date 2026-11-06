@@ -9,7 +9,7 @@ import httpx
 from datetime import datetime, timedelta
 from collections import OrderedDict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from models import Lead, Conversation, Message, AISetting, Business, BusinessMedia, Appointment, WorkingHours
 
 logger = logging.getLogger(__name__)
@@ -36,16 +36,16 @@ def _get_phone_lock(phone: str) -> asyncio.Lock:
 
 
 async def process_incoming_message(
-    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True
+    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True, alt_phone: str = None
 ) -> dict:
     """Process an incoming WhatsApp message end-to-end (sequential per phone)."""
     lock = _get_phone_lock(phone)
     async with lock:
-        return await _process_message_inner(phone, message, name, business_id, db, reply_to, should_reply)
+        return await _process_message_inner(phone, message, name, business_id, db, reply_to, should_reply, alt_phone)
 
 
 async def _process_message_inner(
-    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True
+    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True, alt_phone: str = None
 ) -> dict:
     """Internal message processing — runs under per-phone lock."""
     # 0. Do not create lead, conversation, or message if message is completely empty
@@ -53,19 +53,30 @@ async def _process_message_inner(
         logger.info(f"[Engine] Ignoring empty message from {phone} (biz={business_id})")
         return {"reply": None, "skipped": True}
 
-    # 1. Find or create lead (scoped to business)
+    phone_clean = phone.strip()
+    alt_clean = (alt_phone or "").strip()
+
+    # 1. Find or create lead (scoped to business, match primary or alt LID/phone)
+    conditions = [Lead.phone_number == phone_clean]
+    if alt_clean and alt_clean != phone_clean:
+        conditions.append(Lead.phone_number == alt_clean)
+
     result = await db.execute(
-        select(Lead).where(Lead.phone_number == phone, Lead.business_id == business_id)
+        select(Lead).where(Lead.business_id == business_id, or_(*conditions))
     )
     lead = result.scalar_one_or_none()
     if not lead:
-        lead = Lead(phone_number=phone, name=name or "Unknown", business_id=business_id)
+        lead = Lead(phone_number=phone_clean, name=name or "Unknown", business_id=business_id)
         db.add(lead)
         await db.flush()
         await db.refresh(lead)
         logger.info(f"[Engine] Created new lead for biz {business_id}: {lead.name} ({lead.phone_number})")
-    elif name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
-        lead.name = name
+    else:
+        # If existing lead has LID and we now have clean real phone number, upgrade it
+        if alt_clean and lead.phone_number == alt_clean and phone_clean != alt_clean:
+            lead.phone_number = phone_clean
+        if name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+            lead.name = name
         await db.flush()
 
     # 2. Find or create conversation
@@ -82,11 +93,16 @@ async def _process_message_inner(
         await db.flush()
         await db.refresh(conv)
 
-    # 3. Save incoming message so it is ALWAYS visible in the UI
+    # 3. Clean raw base64 image strings if received
+    saved_text = message.strip()
+    if saved_text.startswith('/9j/') or saved_text.startswith('data:image') or (len(saved_text) > 300 and ' ' not in saved_text):
+        saved_text = '[Photo received]'
+
+    # Save incoming message so it is ALWAYS visible in the UI
     customer_msg = Message(
         conversation_id=conv.id,
         sender_type="customer",
-        message_text=message,
+        message_text=saved_text,
     )
     db.add(customer_msg)
     await db.flush()
@@ -320,26 +336,38 @@ async def record_outgoing_human_message(
     message: str,
     name: str = "Unknown",
     business_id: int = 1,
+    alt_phone: str = None,
     db: AsyncSession = None,
 ) -> dict:
     """Record an outgoing message sent manually by the user from their WhatsApp phone/web."""
     if not message or not str(message).strip():
         return {"skipped": True}
 
-    async with _get_phone_lock(phone):
-        # 1. Find or create lead (scoped to business)
+    phone_clean = phone.strip()
+    alt_clean = (alt_phone or "").strip()
+
+    async with _get_phone_lock(phone_clean):
+        # 1. Find or create lead (scoped to business, match primary phone or alternate LID)
+        conditions = [Lead.phone_number == phone_clean]
+        if alt_clean and alt_clean != phone_clean:
+            conditions.append(Lead.phone_number == alt_clean)
+
         result = await db.execute(
-            select(Lead).where(Lead.phone_number == phone, Lead.business_id == business_id)
+            select(Lead).where(Lead.business_id == business_id, or_(*conditions))
         )
         lead = result.scalar_one_or_none()
         if not lead:
-            lead = Lead(phone_number=phone, name=name or "Unknown", business_id=business_id)
+            lead = Lead(phone_number=phone_clean, name=name or "Unknown", business_id=business_id)
             db.add(lead)
             await db.flush()
             await db.refresh(lead)
             logger.info(f"[Engine] Created new lead for outgoing WhatsApp message: {lead.name} ({lead.phone_number})")
-        elif name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
-            lead.name = name
+        else:
+            # If lead had LID and we now have clean real phone number, upgrade it
+            if alt_clean and lead.phone_number == alt_clean and phone_clean != alt_clean:
+                lead.phone_number = phone_clean
+            if name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+                lead.name = name
             await db.flush()
 
         # 2. Find or create conversation
@@ -356,16 +384,21 @@ async def record_outgoing_human_message(
             await db.flush()
             await db.refresh(conv)
 
-        # 3. Save message with sender_type="human" so it appears as "👤 You" in dashboard
+        # 3. Clean raw base64 image strings if outgoing media
+        clean_text = message.strip()
+        if clean_text.startswith('/9j/') or clean_text.startswith('data:image') or (len(clean_text) > 300 and ' ' not in clean_text):
+            clean_text = '[Photo sent]'
+
+        # Save message with sender_type="human" so it appears as "👤 You" in dashboard
         human_msg = Message(
             conversation_id=conv.id,
             sender_type="human",
-            message_text=message.strip(),
+            message_text=clean_text,
         )
         db.add(human_msg)
         await db.flush()
 
-        logger.info(f"[Engine] Recorded manual WhatsApp message from owner to {phone} (conv={conv.id})")
+        logger.info(f"[Engine] Recorded manual WhatsApp message from owner to {phone_clean} (conv={conv.id})")
         return {"lead_id": lead.id, "conversation_id": conv.id, "message_id": human_msg.id}
 
 

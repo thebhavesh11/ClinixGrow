@@ -5,7 +5,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from database import get_db
 from schemas import WhatsAppWebhook, WhatsAppOutgoingWebhook, ChatSyncPayload
 from models import AISetting, Lead, Conversation, Message
@@ -245,6 +245,7 @@ async def webhook(data: WhatsAppWebhook, db: AsyncSession = Depends(get_db)):
             db=db,
             reply_to=data.reply_to,
             should_reply=data.should_reply,
+            alt_phone=data.alt_phone,
         )
         return {"status": "processed", "result": result}
     except Exception as e:
@@ -264,6 +265,7 @@ async def outgoing_webhook(data: WhatsAppOutgoingWebhook, db: AsyncSession = Dep
             message=data.message,
             name=data.name or "Unknown",
             business_id=target_biz_id,
+            alt_phone=data.alt_phone,
             db=db,
         )
         return {"status": "recorded", "result": result}
@@ -285,9 +287,15 @@ async def sync_chats(payload: ChatSyncPayload, db: AsyncSession = Depends(get_db
             if not phone:
                 continue
 
-            # 1. Find or create lead
+            alt_p = (item.alt_phone or "").strip()
+
+            # 1. Find or create lead (match phone or alternate LID)
+            conditions = [Lead.phone_number == phone]
+            if alt_p and alt_p != phone:
+                conditions.append(Lead.phone_number == alt_p)
+
             res = await db.execute(
-                select(Lead).where(Lead.phone_number == phone, Lead.business_id == biz_id)
+                select(Lead).where(Lead.business_id == biz_id, or_(*conditions))
             )
             lead = res.scalar_one_or_none()
             if not lead:
@@ -295,8 +303,12 @@ async def sync_chats(payload: ChatSyncPayload, db: AsyncSession = Depends(get_db
                 db.add(lead)
                 await db.flush()
                 await db.refresh(lead)
-            elif item.name and item.name != "Unknown" and (not lead.name or lead.name == "Unknown"):
-                lead.name = item.name
+            else:
+                # If lead has LID and we have clean real phone number, upgrade it
+                if alt_p and lead.phone_number == alt_p and phone != alt_p:
+                    lead.phone_number = phone
+                if item.name and item.name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+                    lead.name = item.name
                 await db.flush()
 
             # 2. Find or create conversation
@@ -319,12 +331,17 @@ async def sync_chats(payload: ChatSyncPayload, db: AsyncSession = Depends(get_db
             )
             existing_msg = m_res.scalar_one_or_none()
             if not existing_msg and item.last_message:
+                raw_text = item.last_message
+                # Clean base64 image strings so DB stays compact and UI stays fast
+                if raw_text.startswith('/9j/') or raw_text.startswith('data:image') or (len(raw_text) > 200 and ' ' not in raw_text):
+                    raw_text = '[Photo]'
+
                 msg_time = datetime.utcfromtimestamp(item.timestamp) if item.timestamp else datetime.utcnow()
                 sender = "human" if item.from_me else "customer"
                 msg = Message(
                     conversation_id=conv.id,
                     sender_type=sender,
-                    message_text=item.last_message,
+                    message_text=raw_text,
                     created_at=msg_time,
                 )
                 db.add(msg)

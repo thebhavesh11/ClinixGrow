@@ -26,10 +26,10 @@ from routers import business, ai_settings, leads, conversations, dashboard, what
 async def lifespan(app: FastAPI):
     """Create tables on startup, migrate columns, and seed defaults."""
     from database import async_session, DB_PATH
-    from sqlalchemy import select, text
+    from sqlalchemy import select, text, delete, or_
     import secrets
     import sqlite3
-    from models import Business, AISetting, WorkingHours, VoiceSettings
+    from models import Business, AISetting, WorkingHours, VoiceSettings, Lead, Conversation, Message, Appointment
 
     # Set SQLite WAL mode and busy timeout via standard sqlite3 before connection pool starts
     try:
@@ -220,6 +220,28 @@ async def lifespan(app: FastAPI):
                     import secrets
                     session.add(VoiceSettings(business_id=1, webhook_secret=secrets.token_hex(16)))
                     logger.info("Seeded default voice settings")
+                # Clean up accidental self-chat lead created for the owner's own phone / LID (+91 88052 55617)
+                try:
+                    owner_self_leads = (await session.execute(
+                        select(Lead).where(
+                            or_(
+                                Lead.phone_number == "43778719150094",
+                                Lead.phone_number.like("%8805255617%"),
+                                Lead.name.like("%88052%55617%"),
+                                Lead.phone_number == "918805255617",
+                            )
+                        )
+                    )).scalars().all()
+                    for sl in owner_self_leads:
+                        await session.execute(delete(Appointment).where(Appointment.lead_id == sl.id))
+                        convs = (await session.execute(select(Conversation).where(Conversation.lead_id == sl.id))).scalars().all()
+                        for c in convs:
+                            await session.execute(delete(Message).where(Message.conversation_id == c.id))
+                            await session.delete(c)
+                        await session.delete(sl)
+                        logger.info(f"Cleaned up self-chat lead {sl.id} ({sl.name}, {sl.phone_number})")
+                except Exception as sc_err:
+                    logger.warning(f"Self-chat cleanup warning: {sc_err}")
     except Exception as e:
         logger.error(f"Startup error: {type(e).__name__}: {e}")
         raise

@@ -228,7 +228,8 @@ export default function Conversations() {
                 const lead = conv.lead || {};
                 const isA = conv.id === activeId;
                 const isHO = lead.lead_status === 'handover';
-                const lastMsg = conv.last_message || 'No messages yet';
+                const rawLastMsg = conv.last_message || 'No messages yet';
+                const lastMsg = (rawLastMsg.startsWith('/9j/') || rawLastMsg.startsWith('data:image/')) ? '📷 [Photo]' : rawLastMsg;
                 const lastTime = conv.last_message_time || conv.created_at;
 
                 return (
@@ -400,7 +401,15 @@ export default function Conversations() {
                         wordBreak: 'break-word',
                         whiteSpace: 'pre-wrap',
                       }}>
-                        {msg.message_text}
+                        {msg.message_text?.startsWith('data:image/') || (msg.message_text?.startsWith('/9j/') && msg.message_text.length > 100) ? (
+                          <img 
+                            src={msg.message_text.startsWith('data:image/') ? msg.message_text : `data:image/jpeg;base64,${msg.message_text}`} 
+                            alt="WhatsApp Media" 
+                            style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 8, display: 'block' }} 
+                          />
+                        ) : (
+                          msg.message_text
+                        )}
                       </div>
 
                       <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3, display: 'flex', alignItems: 'center', gap: 4 }}>

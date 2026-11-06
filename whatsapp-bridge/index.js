@@ -476,6 +476,7 @@ function initSession(businessId) {
             let name = 'Unknown';
             let isSavedContact = false;
             let phone = msg.from.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
+            let altPhone = null;
 
             try {
                 const contact = await msg.getContact();
@@ -483,7 +484,8 @@ function initSession(businessId) {
                     name = contact.pushname || contact.name || contact.verifiedName || contact.shortName || 'Unknown';
                     isSavedContact = Boolean(contact.isMyContact);
                     if (contact.number) {
-                        phone = contact.number;
+                        altPhone = phone; // keep LID as alternate
+                        phone = contact.number; // use real phone number
                     } else if (contact.id && contact.id.user && !contact.id._serialized.includes('@lid')) {
                         phone = contact.id.user;
                     }
@@ -532,6 +534,7 @@ function initSession(businessId) {
             // Forward to backend with this session's business_id
             await axios.post(`${BACKEND_URL}/api/whatsapp/webhook`, {
                 phone: isGroup ? msg.from : phone,
+                alt_phone: altPhone,
                 message: outgoingText,
                 name: name,
                 business_id: session.businessId,
@@ -557,19 +560,29 @@ function initSession(businessId) {
             }
 
             const bodyText = (msg.body || '').trim();
-            const recipient = msg.to || '';
+            const rawTarget = msg.to || msg.id?.remote || '';
 
             // Skip status broadcasts, newsletters
-            if (!recipient || recipient === 'status@broadcast' || recipient.includes('@broadcast') || recipient.includes('@newsletter')) return;
+            if (!rawTarget || rawTarget === 'status@broadcast' || rawTarget.includes('@broadcast') || rawTarget.includes('@newsletter')) return;
             if (msg.isStatus) return;
 
+            // Ignore system/protocol events (e2e encryption notices, call logs, stub notifications)
             const IGNORED_TYPES = ['e2e_notification', 'notification', 'notification_template', 'protocol', 'call_log', 'gp2', 'ciphertext'];
             if (IGNORED_TYPES.includes(msg.type)) return;
 
             if (!bodyText && !msg.hasMedia) return;
 
             // Check if recently sent by bot
-            if (isRecentBotSend(recipient, bodyText)) {
+            if (isRecentBotSend(rawTarget, bodyText)) {
+                return;
+            }
+
+            // Skip self-notes (owner messaging their own number)
+            const myWid = session.connectionInfo?.wid ? (typeof session.connectionInfo.wid === 'string' ? session.connectionInfo.wid : session.connectionInfo.wid._serialized) : '';
+            const myPhone = session.connectionInfo?.phone || '';
+            const myUser = session.connectionInfo?.wid?.user || myPhone;
+            if (rawTarget === myWid || (myPhone && rawTarget.includes(myPhone)) || (myUser && rawTarget.includes(myUser))) {
+                console.log(`[Bridge-Biz-${session.businessId}] Skipping self-note outgoing message`);
                 return;
             }
 
@@ -578,27 +591,37 @@ function initSession(businessId) {
             // Only capture messages sent after the bridge is ready or within the last 60 seconds
             if (msgTime < (readyTime - 15) && msgTime < (BRIDGE_BOOT_TIME - 60)) return;
 
-            const isGroup = recipient.includes('@g.us');
-            let phone = recipient.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
+            const isGroup = rawTarget.includes('@g.us');
+            let phone = isGroup ? rawTarget : rawTarget.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
+            let altPhone = null;
             let name = 'Unknown';
 
             try {
-                const contact = await msg.getContact();
-                if (contact) {
-                    name = contact.pushname || contact.name || contact.verifiedName || contact.shortName || 'Unknown';
-                    if (contact.number) {
-                        phone = contact.number;
-                    } else if (contact.id?.user && !contact.id._serialized.includes('@lid')) {
-                        phone = contact.id.user;
+                const chat = await msg.getChat();
+                if (chat) {
+                    if (chat.name) name = chat.name;
+                    if (!isGroup) {
+                        const chatUser = chat.id?.user || rawTarget.replace(/@c\.us$/, '').replace(/@lid$/, '');
+                        phone = chatUser;
+                        // For 1-on-1, fetch the recipient contact from the chat (NOT msg.getContact()!)
+                        try {
+                            const recipientContact = await chat.getContact();
+                            if (recipientContact && !recipientContact.isMe) {
+                                name = recipientContact.pushname || recipientContact.name || recipientContact.verifiedName || recipientContact.shortName || name;
+                                if (recipientContact.number && recipientContact.number !== myPhone) {
+                                    altPhone = phone; // keep LID as alternate
+                                    phone = recipientContact.number; // use real phone as primary
+                                }
+                            }
+                        } catch (_) {}
                     }
                 }
             } catch (_) {}
 
-            if (isGroup) {
-                try {
-                    const chat = await msg.getChat();
-                    if (chat && chat.name) name = chat.name;
-                } catch (_) {}
+            // CRITICAL SAFEGUARD: Outgoing message must NEVER be filed under the owner's own phone or LID!
+            if ((myPhone && phone === myPhone) || (myUser && phone === myUser)) {
+                console.warn(`[Bridge-Biz-${session.businessId}] Safeguard: phone matched owner (${phone}), reverting to target ${rawTarget}`);
+                phone = isGroup ? rawTarget : rawTarget.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
             }
 
             const outgoingText = bodyText || `[${msg.type || 'media'} sent]`;
@@ -606,7 +629,8 @@ function initSession(businessId) {
 
             // Forward to backend to save as 'human' message
             await axios.post(`${BACKEND_URL}/api/whatsapp/outgoing-webhook`, {
-                phone: isGroup ? recipient : phone,
+                phone: isGroup ? rawTarget : phone,
+                alt_phone: altPhone,
                 message: outgoingText,
                 name: name,
                 business_id: session.businessId,
@@ -860,23 +884,48 @@ async function syncRecentChatsToBackend(session) {
         }
 
         const syncPayload = [];
+        const myWid = session.connectionInfo?.wid ? (typeof session.connectionInfo.wid === 'string' ? session.connectionInfo.wid : session.connectionInfo.wid._serialized) : '';
+        const myPhone = session.connectionInfo?.phone || '';
+        const myUser = session.connectionInfo?.wid?.user || myPhone;
 
-        for (const c of (chats || []).slice(0, 50)) {
+        for (const c of (chats || []).slice(0, 60)) {
             const sId = c.id?._serialized || (typeof c.id === 'string' ? c.id : '');
             if (!sId || sId.includes('@broadcast') || sId.includes('@newsletter')) continue;
 
+            // Skip owner self-note chat
+            if (sId === myWid || (myPhone && sId.includes(myPhone)) || (myUser && sId.includes(myUser)) || c.isMe) {
+                console.log(`[Bridge-Biz-${session.businessId}] Skipping self-note chat: ${sId}`);
+                continue;
+            }
+
             const isGroup = Boolean(c.isGroup);
             let phone = isGroup ? sId : (c.id?.user || sId.replace(/@c\.us$/, '').replace(/@lid$/, ''));
+            let altPhone = null;
             let name = c.name || phone || 'Unknown';
+
+            // Also check if contact object has cleaner name or real phone
+            if (!isGroup && c.contact) {
+                name = c.contact.pushname || c.contact.name || name;
+                if (c.contact.number && c.contact.number !== myPhone) {
+                    altPhone = phone;
+                    phone = c.contact.number;
+                }
+            }
 
             const lastMsg = c.lastMessage;
             if (!lastMsg) continue;
 
-            const bodyText = (lastMsg.body || '').trim() || (lastMsg.hasMedia ? `[${lastMsg.type || 'media'}]` : '');
+            let bodyText = (lastMsg.body || '').trim() || (lastMsg.hasMedia ? `[${lastMsg.type || 'media'}]` : '');
             if (!bodyText) continue;
+
+            // Clean raw base64 image strings from preview
+            if (bodyText.startsWith('/9j/') || bodyText.startsWith('data:image') || (bodyText.length > 200 && !bodyText.includes(' '))) {
+                bodyText = '[Photo]';
+            }
 
             syncPayload.push({
                 phone: phone,
+                alt_phone: altPhone,
                 name: name,
                 business_id: session.businessId,
                 is_group: isGroup,

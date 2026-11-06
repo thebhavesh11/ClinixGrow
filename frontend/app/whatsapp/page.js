@@ -649,7 +649,7 @@ export default function WhatsApp() {
                               }}>
                                 {conv.last_sender_type === 'ai' && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>🤖 AI: </span>}
                                 {conv.last_sender_type === 'human' && <span style={{ color: 'var(--warning)', fontWeight: 600 }}>👤 You: </span>}
-                                <span>{lastMsg}</span>
+                                <span>{lastMsg && (lastMsg.startsWith('/9j/') || lastMsg.startsWith('data:image') || (lastMsg.length > 150 && !lastMsg.includes(' '))) ? '📷 [Photo]' : lastMsg}</span>
                               </div>
 
                               {/* Badges */}
@@ -819,7 +819,15 @@ export default function WhatsApp() {
                                   wordBreak: 'break-word',
                                   whiteSpace: 'pre-wrap',
                                 }}>
-                                  {msg.message_text}
+                                  {msg.message_text?.startsWith('data:image/') || (msg.message_text?.startsWith('/9j/') && msg.message_text.length > 100) ? (
+                                  <img 
+                                    src={msg.message_text.startsWith('data:image/') ? msg.message_text : `data:image/jpeg;base64,${msg.message_text}`} 
+                                    alt="WhatsApp Media" 
+                                    style={{ maxWidth: '100%', maxHeight: 260, borderRadius: 8, display: 'block' }} 
+                                  />
+                                ) : (
+                                  msg.message_text
+                                )}
                                 </div>
 
                                 {/* Timestamp + Delivery indicator */}
