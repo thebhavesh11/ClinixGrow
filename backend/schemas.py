@@ -1,7 +1,7 @@
 """Pydantic schemas for request/response validation."""
 
 from pydantic import BaseModel, field_validator
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 
