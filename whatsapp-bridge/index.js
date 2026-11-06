@@ -17,7 +17,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = 3001;
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 const BRIDGE_BOOT_TIME = Math.floor(Date.now() / 1000);
 
 // ── Multi-Session Store ─────────────────────────────────────────────
@@ -295,6 +295,9 @@ function initSession(businessId) {
                             session.connectionInfo = { pushname: 'WhatsApp User', platform: 'WhatsApp Web' };
                         }
                         clearInterval(readyWatchdog);
+                        setTimeout(() => {
+                            syncRecentChatsToBackend(session);
+                        }, 3000);
                     }
                 }
             } catch (wErr) {
@@ -323,6 +326,10 @@ function initSession(businessId) {
         } catch (err) {
             console.error(`[Bridge-Biz-${session.businessId}] Error getting info:`, err);
         }
+
+        setTimeout(() => {
+            syncRecentChatsToBackend(session);
+        }, 3000);
     });
 
     client.on('auth_failure', (msg) => {
@@ -674,6 +681,60 @@ app.get('/chats/:chatId/messages', async (req, res) => {
         console.error(`[Bridge-Biz-${bid}] Failed to fetch messages:`, err.message);
         res.status(500).json({ success: false, error: err.message });
     }
+});
+
+async function syncRecentChatsToBackend(session) {
+    if (!session || !session.client || !session.isConnected) return;
+    try {
+        console.log(`[Bridge-Biz-${session.businessId}] Starting initial chat sync from WhatsApp...`);
+        const chats = await session.client.getChats();
+        const syncPayload = [];
+
+        for (const c of chats.slice(0, 40)) {
+            const sId = c.id?._serialized || '';
+            if (!sId || sId.includes('@broadcast') || sId.includes('@newsletter')) continue;
+
+            const isGroup = Boolean(c.isGroup);
+            let phone = isGroup ? sId : (c.id?.user || sId.replace(/@c\.us$/, '').replace(/@lid$/, ''));
+            let name = c.name || phone || 'Unknown';
+
+            const lastMsg = c.lastMessage;
+            if (!lastMsg) continue;
+
+            const bodyText = (lastMsg.body || '').trim() || (lastMsg.hasMedia ? `[${lastMsg.type || 'media'}]` : '');
+            if (!bodyText) continue;
+
+            syncPayload.push({
+                phone: phone,
+                name: name,
+                business_id: session.businessId,
+                is_group: isGroup,
+                last_message: bodyText,
+                timestamp: lastMsg.timestamp ? lastMsg.timestamp : Math.floor(Date.now() / 1000),
+                from_me: Boolean(lastMsg.fromMe),
+            });
+        }
+
+        if (syncPayload.length > 0) {
+            await axios.post(`${BACKEND_URL}/api/whatsapp/sync-chats`, {
+                business_id: session.businessId,
+                chats: syncPayload,
+            }, { timeout: 30000 });
+            console.log(`[Bridge-Biz-${session.businessId}] Successfully synced ${syncPayload.length} WhatsApp chats to backend`);
+        }
+    } catch (err) {
+        console.warn(`[Bridge-Biz-${session.businessId}] Chat sync warning:`, err.message);
+    }
+}
+
+app.post('/sync-chats', async (req, res) => {
+    const bid = parseInt(req.body?.business_id || req.query.business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.status(503).json({ success: false, error: `WhatsApp not connected for business ${bid}` });
+    }
+    await syncRecentChatsToBackend(session);
+    res.json({ success: true, message: `Chat sync completed for business ${bid}` });
 });
 
 app.post('/send', async (req, res) => {

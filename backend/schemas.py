@@ -207,6 +207,21 @@ class WhatsAppOutgoingWebhook(BaseModel):
     is_group: bool = False
 
 
+class ChatSyncItem(BaseModel):
+    phone: str
+    name: Optional[str] = "Unknown"
+    business_id: Optional[int] = 1
+    is_group: Optional[bool] = False
+    last_message: str
+    timestamp: Optional[int] = None
+    from_me: Optional[bool] = False
+
+
+class ChatSyncPayload(BaseModel):
+    business_id: int = 1
+    chats: List[ChatSyncItem]
+
+
 # ── Working Hours ─────────────────────────────────────────
 class WorkingHoursItem(BaseModel):
     day_of_week: int  # 0=Monday ... 6=Sunday

@@ -10,8 +10,8 @@ from models import Appointment, Lead, AISetting
 
 logger = logging.getLogger(__name__)
 
-BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 # Check every 2 minutes
 CHECK_INTERVAL = 120

@@ -262,7 +262,7 @@ async def delete_client(client_id: int, db: AsyncSession = Depends(get_db)):
     await db.flush()
 
     # 9. Clean up WhatsApp session on bridge
-    bridge_url = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+    bridge_url = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
     try:
         async with httpx.AsyncClient(timeout=1.5) as http_client:
             await http_client.delete(f"{bridge_url}/session/{client_id}")

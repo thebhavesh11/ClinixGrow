@@ -15,7 +15,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
 
 router = APIRouter(prefix="/api/conversations", tags=["Conversations"])
 

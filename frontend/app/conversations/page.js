@@ -16,6 +16,7 @@ export default function Conversations() {
   const [toast, setToast] = useState(null);
   const [showDemo, setShowDemo] = useState(false);
   const [waConnected, setWaConnected] = useState(true);
+  const [syncingChats, setSyncingChats] = useState(false);
   const chatEndRef = useRef(null);
   const inputRef = useRef(null);
   const { bUrl, selectedClientId } = useClient();
@@ -23,6 +24,22 @@ export default function Conversations() {
   const showToast = (msg, type = 'success') => {
     setToast({ message: msg, type });
     setTimeout(() => setToast(null), 3500);
+  };
+
+  const triggerChatSync = async () => {
+    setSyncingChats(true);
+    showToast('Syncing recent WhatsApp chats...', 'info');
+    const [d, err] = await safeFetch(bUrl('/whatsapp/trigger-sync'), { method: 'POST' });
+    setSyncingChats(false);
+    if (d?.success || d?.synced_count !== undefined) {
+      showToast('Chats synced successfully!', 'success');
+      fetchConversations().then(list => {
+        if (list.length > 0 && !activeId) setActiveId(list[0].id);
+      });
+    } else {
+      showToast(err || d?.error || 'Chat sync completed', 'success');
+      fetchConversations();
+    }
   };
 
   const checkWhatsApp = async () => {
@@ -165,7 +182,18 @@ export default function Conversations() {
           <div style={{ padding: 16, borderBottom: '1px solid var(--border-color)' }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
               <h2 style={{ fontSize: 18, fontWeight: 700 }}>Conversations</h2>
-              <button className="demo-chat-trigger" onClick={() => setShowDemo(true)}>🧪 Test AI</button>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <button
+                  className="btn btn-secondary btn-sm"
+                  onClick={triggerChatSync}
+                  disabled={syncingChats}
+                  title="Sync recent WhatsApp chats from phone"
+                  style={{ fontSize: 11, padding: '4px 10px', height: 30 }}
+                >
+                  {syncingChats ? '⏳ Syncing...' : '🔄 Sync'}
+                </button>
+                <button className="demo-chat-trigger" onClick={() => setShowDemo(true)}>🧪 Test AI</button>
+              </div>
             </div>
             <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 12 }}>
               Active WhatsApp threads managed by FlowBot
@@ -182,7 +210,18 @@ export default function Conversations() {
           <div style={{ padding: '6px 8px', flex: 1, overflowY: 'auto' }}>
             {filtered.length === 0 ? (
               <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
-                No conversations found
+                <div style={{ fontSize: 26, marginBottom: 8 }}>💬</div>
+                <div>{search ? 'No matching conversations' : 'No conversations found'}</div>
+                {!search && (
+                  <button
+                    onClick={triggerChatSync}
+                    disabled={syncingChats}
+                    className="btn btn-primary btn-sm"
+                    style={{ marginTop: 12, fontSize: 11, padding: '6px 14px' }}
+                  >
+                    {syncingChats ? '⏳ Syncing chats...' : '🔄 Sync WhatsApp Chats'}
+                  </button>
+                )}
               </div>
             ) : (
               filtered.map(conv => {

@@ -30,12 +30,29 @@ export default function WhatsApp() {
   const [webhookStatus, setWebhookStatus] = useState(null);
   const [subscribing, setSubscribing] = useState(false);
   const [customWebhookUrl, setCustomWebhookUrl] = useState('');
+  const [syncingChats, setSyncingChats] = useState(false);
 
   const { bUrl, selectedClientId } = useClient();
 
   const showToast = (msg, type = 'success') => {
     setToast({ message: msg, type });
     setTimeout(() => setToast(null), 3500);
+  };
+
+  const triggerChatSync = async () => {
+    setSyncingChats(true);
+    showToast('Syncing recent WhatsApp chats...', 'info');
+    const [d, err] = await safeFetch(bUrl('/whatsapp/trigger-sync'), { method: 'POST' });
+    setSyncingChats(false);
+    if (d?.success || d?.synced_count !== undefined) {
+      showToast('Chats synced successfully!', 'success');
+      fetchConversations().then(list => {
+        if (list.length > 0 && !activeId) setActiveId(list[0].id);
+      });
+    } else {
+      showToast(err || d?.error || 'Chat sync completed', 'success');
+      fetchConversations();
+    }
   };
 
   const fetchQR = async () => {
@@ -512,22 +529,33 @@ export default function WhatsApp() {
                 <div className="split-left" style={{ width: 360, minWidth: 360, background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)' }}>
                   {/* Search Header */}
                   <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border-color)' }}>
-                    <div style={{ position: 'relative' }}>
-                      <input
-                        className="form-input"
-                        placeholder="🔍 Search name, number, or message..."
-                        value={search}
-                        onChange={e => setSearch(e.target.value)}
-                        style={{ fontSize: 12, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-primary)' }}
-                      />
-                      {search && (
-                        <button
-                          onClick={() => setSearch('')}
-                          style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 12 }}
-                        >
-                          ✕
-                        </button>
-                      )}
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <div style={{ position: 'relative', flex: 1 }}>
+                        <input
+                          className="form-input"
+                          placeholder="🔍 Search name, number..."
+                          value={search}
+                          onChange={e => setSearch(e.target.value)}
+                          style={{ fontSize: 12, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-primary)' }}
+                        />
+                        {search && (
+                          <button
+                            onClick={() => setSearch('')}
+                            style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 12 }}
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                      <button
+                        onClick={triggerChatSync}
+                        disabled={syncingChats}
+                        className="btn btn-secondary btn-sm"
+                        title="Sync recent WhatsApp chats from phone"
+                        style={{ padding: '8px 12px', fontSize: 11, whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4, height: 36, borderRadius: 8 }}
+                      >
+                        {syncingChats ? '⏳ Syncing...' : '🔄 Sync'}
+                      </button>
                     </div>
                   </div>
 
@@ -536,7 +564,17 @@ export default function WhatsApp() {
                     {filteredConversations.length === 0 ? (
                       <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
                         <div style={{ fontSize: 28, marginBottom: 8 }}>💬</div>
-                        {search ? 'No matching chats found' : 'No WhatsApp conversations yet. Incoming messages will appear here live!'}
+                        <div>{search ? 'No matching chats found' : 'No WhatsApp conversations yet.'}</div>
+                        {!search && (
+                          <button
+                            onClick={triggerChatSync}
+                            disabled={syncingChats}
+                            className="btn btn-primary btn-sm"
+                            style={{ marginTop: 14, fontSize: 12, padding: '8px 16px', borderRadius: 8 }}
+                          >
+                            {syncingChats ? '⏳ Syncing chats...' : '🔄 Sync Recent WhatsApp Chats'}
+                          </button>
+                        )}
                       </div>
                     ) : (
                       filteredConversations.map(conv => {

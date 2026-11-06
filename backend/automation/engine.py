@@ -14,8 +14,8 @@ from models import Lead, Conversation, Message, AISetting, Business, BusinessMed
 
 logger = logging.getLogger(__name__)
 
-BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
 # Per-phone lock: ensures messages from the same customer are processed one at a time
 # Uses OrderedDict with a max cap to prevent unbounded memory growth

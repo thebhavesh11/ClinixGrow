@@ -7,13 +7,14 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from database import get_db
-from schemas import WhatsAppWebhook, WhatsAppOutgoingWebhook
-from models import AISetting
+from schemas import WhatsAppWebhook, WhatsAppOutgoingWebhook, ChatSyncPayload
+from models import AISetting, Lead, Conversation, Message
+from datetime import datetime
 import httpx
 
 logger = logging.getLogger(__name__)
 
-BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
 GRAPH_API_VERSION = "v21.0"
 GRAPH_API_BASE = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
 
@@ -269,6 +270,85 @@ async def outgoing_webhook(data: WhatsAppOutgoingWebhook, db: AsyncSession = Dep
     except Exception as e:
         logger.error(f"[OutgoingWebhook] Error saving message to {data.phone}: {type(e).__name__}: {e}", exc_info=True)
         return {"status": "error", "error": str(e)}
+
+
+@router.post("/sync-chats")
+async def sync_chats(payload: ChatSyncPayload, db: AsyncSession = Depends(get_db)):
+    """Bulk sync recent WhatsApp chats into leads, conversations, and messages (no AI reply)."""
+    biz_id = payload.business_id if payload.business_id > 0 else 1
+    logger.info(f"[SyncChats] Syncing {len(payload.chats)} WhatsApp chats for business {biz_id}")
+
+    synced_count = 0
+    for item in payload.chats:
+        try:
+            phone = item.phone.strip()
+            if not phone:
+                continue
+
+            # 1. Find or create lead
+            res = await db.execute(
+                select(Lead).where(Lead.phone_number == phone, Lead.business_id == biz_id)
+            )
+            lead = res.scalar_one_or_none()
+            if not lead:
+                lead = Lead(phone_number=phone, name=item.name or "Unknown", business_id=biz_id)
+                db.add(lead)
+                await db.flush()
+                await db.refresh(lead)
+            elif item.name and item.name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+                lead.name = item.name
+                await db.flush()
+
+            # 2. Find or create conversation
+            res = await db.execute(
+                select(Conversation).where(
+                    Conversation.lead_id == lead.id,
+                    Conversation.business_id == biz_id,
+                )
+            )
+            conv = res.scalar_one_or_none()
+            if not conv:
+                conv = Conversation(lead_id=lead.id, business_id=biz_id)
+                db.add(conv)
+                await db.flush()
+                await db.refresh(conv)
+
+            # 3. Check if conversation already has messages
+            m_res = await db.execute(
+                select(Message).where(Message.conversation_id == conv.id).limit(1)
+            )
+            existing_msg = m_res.scalar_one_or_none()
+            if not existing_msg and item.last_message:
+                msg_time = datetime.utcfromtimestamp(item.timestamp) if item.timestamp else datetime.utcnow()
+                sender = "human" if item.from_me else "customer"
+                msg = Message(
+                    conversation_id=conv.id,
+                    sender_type=sender,
+                    message_text=item.last_message,
+                    created_at=msg_time,
+                )
+                db.add(msg)
+                await db.flush()
+
+            synced_count += 1
+        except Exception as e:
+            logger.warning(f"[SyncChats] Error syncing chat {item.phone}: {e}")
+
+    await db.commit()
+    logger.info(f"[SyncChats] Successfully synced {synced_count} chats for business {biz_id}")
+    return {"success": True, "synced_count": synced_count}
+
+
+@router.post("/trigger-sync")
+async def trigger_sync(business_id: int = Query(1)):
+    """Trigger WhatsApp bridge to sync recent chats from active session."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(f"{BRIDGE_URL}/sync-chats", json={"business_id": business_id})
+            return r.json()
+    except Exception as e:
+        logger.warning(f"[TriggerSync] Failed to trigger sync for biz {business_id}: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════════════════════

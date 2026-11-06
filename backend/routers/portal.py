@@ -18,7 +18,7 @@ from models import Business, Lead, Conversation, Message, Appointment, AISetting
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/portal", tags=["Client Portal"])
-BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+BRIDGE_URL = os.getenv("WHATSAPP_BRIDGE_URL", "http://127.0.0.1:3001")
 
 
 class PinAuthRequest(BaseModel):
