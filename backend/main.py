@@ -33,19 +33,58 @@ async def lifespan(app: FastAPI):
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            # Ensure portal columns exist in SQLite
+            # Ensure missing columns exist in SQLite tables across versions
             try:
+                # 1. Businesses table columns
                 res = await conn.execute(text("PRAGMA table_info(businesses)"))
-                cols = [row[1] for row in res.fetchall()]
-                if "portal_token" not in cols:
+                b_cols = [row[1] for row in res.fetchall()]
+                if "portal_token" not in b_cols:
                     await conn.execute(text("ALTER TABLE businesses ADD COLUMN portal_token VARCHAR(64)"))
                     logger.info("Migrated: added portal_token to businesses")
-                if "portal_pin" not in cols:
+                if "portal_pin" not in b_cols:
                     await conn.execute(text("ALTER TABLE businesses ADD COLUMN portal_pin VARCHAR(20)"))
                     logger.info("Migrated: added portal_pin to businesses")
-                if "logo_url" not in cols:
+                if "logo_url" not in b_cols:
                     await conn.execute(text("ALTER TABLE businesses ADD COLUMN logo_url VARCHAR(500) DEFAULT ''"))
                     logger.info("Migrated: added logo_url to businesses")
+
+                # 2. AI Settings table columns
+                res = await conn.execute(text("PRAGMA table_info(ai_settings)"))
+                ai_cols = [row[1] for row in res.fetchall()]
+                ai_migrations = [
+                    ("reminder_enabled", "INTEGER DEFAULT 0"),
+                    ("reminder_time_mins", "INTEGER DEFAULT 30"),
+                    ("reminder_message_template", "TEXT DEFAULT 'Hi {name}, this is a reminder for your appointment at {time}.'"),
+                    ("feedback_enabled", "INTEGER DEFAULT 0"),
+                    ("feedback_time_mins", "INTEGER DEFAULT 120"),
+                    ("feedback_message_template", "TEXT DEFAULT 'Hi {name}, thank you for your visit! Please share your feedback: [Link]'"),
+                    ("wa_connection_mode", "VARCHAR(20) DEFAULT 'qr'"),
+                    ("wa_app_id", "VARCHAR(100) DEFAULT ''"),
+                    ("wa_app_secret", "VARCHAR(255) DEFAULT ''"),
+                    ("wa_phone_number_id", "VARCHAR(100) DEFAULT ''"),
+                    ("wa_access_token", "VARCHAR(500) DEFAULT ''"),
+                    ("wa_verify_token", "VARCHAR(100) DEFAULT ''"),
+                    ("wa_business_account_id", "VARCHAR(100) DEFAULT ''"),
+                    ("group_replies", "INTEGER DEFAULT 0"),
+                    ("reply_delay", "INTEGER DEFAULT 0"),
+                    ("typing_indicator", "INTEGER DEFAULT 0"),
+                    ("reply_to_contacts", "INTEGER DEFAULT 1"),
+                    ("auto_handover", "INTEGER DEFAULT 0"),
+                    ("handover_after", "INTEGER DEFAULT 10"),
+                    ("scoring_prompt", "TEXT DEFAULT ''"),
+                ]
+                for col_name, col_def in ai_migrations:
+                    if col_name not in ai_cols:
+                        await conn.execute(text(f"ALTER TABLE ai_settings ADD COLUMN {col_name} {col_def}"))
+                        logger.info(f"Migrated: added {col_name} to ai_settings")
+
+                # 3. Multi-client tenant business_id checks
+                for tbl in ["leads", "conversations", "appointments", "working_hours"]:
+                    res = await conn.execute(text(f"PRAGMA table_info({tbl})"))
+                    tbl_cols = [row[1] for row in res.fetchall()]
+                    if tbl_cols and "business_id" not in tbl_cols:
+                        await conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN business_id INTEGER DEFAULT 1"))
+                        logger.info(f"Migrated: added business_id to {tbl}")
             except Exception as mig_err:
                 logger.warning(f"Column migration check warning: {mig_err}")
 
