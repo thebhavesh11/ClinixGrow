@@ -32,6 +32,8 @@ async def lifespan(app: FastAPI):
 
     try:
         async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.execute(text("PRAGMA busy_timeout=10000;"))
             await conn.run_sync(Base.metadata.create_all)
             # Ensure missing columns exist in SQLite tables across versions
             try:
@@ -160,26 +162,6 @@ async def lifespan(app: FastAPI):
                                     logger.info(f"Migrated: added {col_name} to {tbl_name}")
                     except Exception as tbl_err:
                         logger.warning(f"Column migration warning for {tbl_name}: {tbl_err}")
-
-                # Clean up duplicate empty "My Business" records caused by crash-restart loops
-                for tbl_with_biz in ["ai_settings", "working_hours", "voice_settings"]:
-                    try:
-                        await conn.execute(text(f"""
-                            DELETE FROM {tbl_with_biz} WHERE business_id IN (
-                                SELECT id FROM businesses WHERE name = 'My Business' AND id > 1
-                                AND id NOT IN (SELECT business_id FROM leads)
-                                AND id NOT IN (SELECT business_id FROM conversations)
-                            )
-                        """))
-                    except Exception:
-                        pass
-                cleanup_res = await conn.execute(text("""
-                    DELETE FROM businesses WHERE name = 'My Business' AND id > 1
-                    AND id NOT IN (SELECT business_id FROM leads)
-                    AND id NOT IN (SELECT business_id FROM conversations)
-                """))
-                if cleanup_res.rowcount > 0:
-                    logger.info(f"Cleaned up {cleanup_res.rowcount} duplicate empty 'My Business' records")
             except Exception as mig_err:
                 logger.warning(f"Column migration check warning: {mig_err}")
 

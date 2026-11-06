@@ -334,7 +334,7 @@ async def sync_chats(payload: ChatSyncPayload, db: AsyncSession = Depends(get_db
         except Exception as e:
             logger.warning(f"[SyncChats] Error syncing chat {item.phone}: {e}")
 
-    await db.commit()
+    await db.flush()
     logger.info(f"[SyncChats] Successfully synced {synced_count} chats for business {biz_id}")
     return {"success": True, "synced_count": synced_count}
 
