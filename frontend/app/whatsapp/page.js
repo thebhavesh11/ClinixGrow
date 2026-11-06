@@ -1,13 +1,27 @@
 'use client';
-import { useState, useEffect } from 'react';
-import { API, safeFetch } from '../lib/utils';
+import { useState, useEffect, useRef } from 'react';
+import { API, safeFetch, formatWhatsAppTime, formatTime } from '../lib/utils';
 import { useClient } from '../lib/ClientContext';
 
 export default function WhatsApp() {
-  const [status, setStatus] = useState({ connected: false, hasQR: false, info: null, error: null, mode: 'qr' });
+  const [activeTab, setActiveTab] = useState('web'); // 'web' | 'settings'
+  const [status, setStatus] = useState({ connected: false, state: 'starting', hasQR: false, info: null, error: null, mode: 'qr' });
   const [qrImage, setQrImage] = useState(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
+
+  // Chat section state
+  const [conversations, setConversations] = useState([]);
+  const [activeId, setActiveId] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [search, setSearch] = useState('');
+  const [replyText, setReplyText] = useState('');
+  const [sending, setSending] = useState(false);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const chatEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  // Settings state
   const [aiSettings, setAiSettings] = useState(null);
   const [cloudForm, setCloudForm] = useState({ wa_app_id: '', wa_app_secret: '', wa_phone_number_id: '', wa_access_token: '', wa_verify_token: '', wa_business_account_id: '' });
   const [testResult, setTestResult] = useState(null);
@@ -16,11 +30,44 @@ export default function WhatsApp() {
   const [webhookStatus, setWebhookStatus] = useState(null);
   const [subscribing, setSubscribing] = useState(false);
   const [customWebhookUrl, setCustomWebhookUrl] = useState('');
+
   const { bUrl, selectedClientId } = useClient();
 
-  const showToast = (msg, type) => { setToast({ message: msg, type }); setTimeout(() => setToast(null), 3500); };
-  const fetchQR = async () => { const [d] = await safeFetch(`${API}/whatsapp/qr`); if (d?.qr) setQrImage(d.qr); };
-  const checkStatus = async () => { const [d] = await safeFetch(`${API}/whatsapp/status`); if (d) setStatus(d); else setStatus(s => ({ ...s, connected: false, error: 'Backend unreachable' })); if (d?.hasQR) fetchQR(); setLoading(false); };
+  const showToast = (msg, type = 'success') => {
+    setToast({ message: msg, type });
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  const fetchQR = async () => {
+    const [d] = await safeFetch(bUrl('/whatsapp/qr'));
+    if (d?.qr) setQrImage(d.qr);
+  };
+
+  const checkStatus = async () => {
+    const [d] = await safeFetch(bUrl('/whatsapp/status'));
+    if (d) {
+      setStatus(d);
+      if (d.qr) setQrImage(d.qr);
+      else if (d.hasQR) fetchQR();
+    } else {
+      setStatus(s => ({ ...s, connected: false, state: 'disconnected', error: 'Bridge unreachable' }));
+    }
+    setLoading(false);
+  };
+
+  const fetchConversations = async () => {
+    const [d] = await safeFetch(bUrl('/conversations'));
+    const list = Array.isArray(d) ? d : [];
+    setConversations(list);
+    return list;
+  };
+
+  const fetchMessages = async (id) => {
+    if (!id) return;
+    const [d] = await safeFetch(`${API}/conversations/${id}/messages`);
+    setMessages(Array.isArray(d) ? d : []);
+  };
+
   const fetchAI = async () => {
     const [d] = await safeFetch(bUrl('/ai-settings'));
     if (d) {
@@ -33,32 +80,93 @@ export default function WhatsApp() {
     }
   };
 
-  useEffect(() => { checkStatus(); fetchAI(); const iv = setInterval(checkStatus, 8000); return () => clearInterval(iv); }, [selectedClientId]);
+  // Initial load & Client switch
+  useEffect(() => {
+    // Reset view to blank state for the selected client
+    setStatus({ connected: false, state: 'starting', hasQR: false, info: null, error: null, mode: 'qr' });
+    setQrImage(null);
+    setActiveId(null);
+    setMessages([]);
+    setConversations([]);
+    setLoading(true);
+
+    checkStatus();
+    fetchAI();
+    fetchConversations().then(list => {
+      if (list.length > 0) setActiveId(list[0].id);
+    });
+  }, [selectedClientId]);
+
+  // Periodic polling
+  useEffect(() => {
+    const statusIv = setInterval(checkStatus, 5000);
+    const convsIv = setInterval(() => {
+      if (status.connected) fetchConversations();
+    }, 8000);
+    return () => {
+      clearInterval(statusIv);
+      clearInterval(convsIv);
+    };
+  }, [status.connected, selectedClientId]);
+
+  // Load messages when activeId changes
+  useEffect(() => {
+    if (activeId) {
+      setLoadingMessages(true);
+      fetchMessages(activeId).finally(() => setLoadingMessages(false));
+    }
+  }, [activeId]);
+
+  // Live polling for active messages
+  useEffect(() => {
+    if (!activeId || !status.connected) return;
+    const iv = setInterval(() => fetchMessages(activeId), 4000);
+    return () => clearInterval(iv);
+  }, [activeId, status.connected]);
+
+  // Scroll to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const currentMode = aiSettings?.wa_connection_mode || 'qr';
 
   const updateAISetting = async (updates) => {
     if (!aiSettings) return;
     const newSettings = { ...aiSettings, ...updates };
-    const [data, err] = await safeFetch(bUrl('/ai-settings'), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(newSettings) });
-    if (data && !err) { setAiSettings(newSettings); return true; }
-    showToast('Failed to update', 'error'); return false;
+    const [data, err] = await safeFetch(bUrl('/ai-settings'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newSettings),
+    });
+    if (data && !err) {
+      setAiSettings(newSettings);
+      return true;
+    }
+    showToast('Failed to update settings', 'error');
+    return false;
   };
 
   const switchMode = async (mode) => {
     const ok = await updateAISetting({ wa_connection_mode: mode });
-    if (ok) { showToast(mode === 'cloud_api' ? 'Switched to Cloud API' : 'Switched to QR Scan', 'success'); setTestResult(null); setTimeout(checkStatus, 1000); }
+    if (ok) {
+      showToast(mode === 'cloud_api' ? 'Switched to Cloud API' : 'Switched to QR Scan', 'success');
+      setTestResult(null);
+      setTimeout(checkStatus, 1000);
+    }
   };
 
   const saveCloudSettings = async () => {
     setSaving(true);
     const ok = await updateAISetting({ ...cloudForm, wa_connection_mode: 'cloud_api' });
     setSaving(false);
-    if (ok) { showToast('Cloud API settings saved!', 'success'); setTimeout(checkStatus, 1000); }
+    if (ok) {
+      showToast('Cloud API settings saved!', 'success');
+      setTimeout(checkStatus, 1000);
+    }
   };
 
   const testCloudConnection = async () => {
-    // First save, then test
     setSaving(true);
     const saveOk = await updateAISetting({ ...cloudForm, wa_connection_mode: 'cloud_api' });
     setSaving(false);
@@ -66,7 +174,7 @@ export default function WhatsApp() {
 
     setTesting(true);
     setTestResult({ loading: true });
-    const [d, err] = await safeFetch(`${API}/whatsapp/cloud/test`, { method: 'POST' });
+    const [d, err] = await safeFetch(bUrl('/whatsapp/cloud/test'), { method: 'POST' });
     setTesting(false);
     if (d) {
       setTestResult(d);
@@ -76,14 +184,40 @@ export default function WhatsApp() {
     }
   };
 
-  const disconnect = async () => { if (!confirm('Disconnect? You will need to scan QR again.')) return; const [, err] = await safeFetch(`${API}/whatsapp/disconnect`, { method: 'POST' }); if (!err) { showToast('Disconnected.', 'success'); setQrImage(null); checkStatus(); } else { showToast('Disconnect failed', 'error'); } };
-  const restart = async () => { const [, err] = await safeFetch(`${API}/whatsapp/restart`, { method: 'POST' }); if (!err) { showToast('Restarting...', 'success'); setTimeout(checkStatus, 5000); } else { showToast('Restart failed', 'error'); } };
-  const toggleGroupReplies = async () => { const v = aiSettings?.group_replies ? 0 : 1; const ok = await updateAISetting({ group_replies: v }); if (ok) showToast(v ? 'Group replies ON' : 'Group replies OFF', 'success'); };
+  const disconnect = async () => {
+    if (!confirm('Are you sure you want to disconnect WhatsApp? You will need to scan QR again.')) return;
+    const [, err] = await safeFetch(bUrl('/whatsapp/disconnect'), { method: 'POST' });
+    if (!err) {
+      showToast('Disconnected successfully.', 'success');
+      setQrImage(null);
+      setActiveId(null);
+      setMessages([]);
+      checkStatus();
+    } else {
+      showToast('Disconnect failed', 'error');
+    }
+  };
+
+  const restart = async () => {
+    const [, err] = await safeFetch(bUrl('/whatsapp/restart'), { method: 'POST' });
+    if (!err) {
+      showToast('Restarting WhatsApp bridge...', 'success');
+      setTimeout(checkStatus, 3000);
+    } else {
+      showToast('Restart failed', 'error');
+    }
+  };
+
+  const toggleGroupReplies = async () => {
+    const v = aiSettings?.group_replies ? 0 : 1;
+    const ok = await updateAISetting({ group_replies: v });
+    if (ok) showToast(v ? 'Group replies ON' : 'Group replies OFF', 'success');
+  };
 
   const webhookUrl = typeof window !== 'undefined' ? `${window.location.origin}/api/whatsapp/cloud/webhook` : '';
 
   const checkWebhookStatus = async () => {
-    const [d] = await safeFetch(`${API}/whatsapp/cloud/webhook-status`);
+    const [d] = await safeFetch(bUrl('/whatsapp/cloud/webhook-status'));
     if (d) setWebhookStatus(d);
   };
 
@@ -92,7 +226,7 @@ export default function WhatsApp() {
     if (!url) { showToast('Enter a webhook URL', 'error'); return; }
     if (!url.startsWith('https://')) { showToast('Webhook URL must start with https://', 'error'); return; }
     setSubscribing(true);
-    const [d, err] = await safeFetch(`${API}/whatsapp/cloud/subscribe?webhook_url=${encodeURIComponent(url)}`, { method: 'POST' });
+    const [d, err] = await safeFetch(bUrl(`/whatsapp/cloud/subscribe?webhook_url=${encodeURIComponent(url)}`), { method: 'POST' });
     setSubscribing(false);
     if (d?.success) {
       showToast('✅ Webhook subscribed! Meta will send messages now.', 'success');
@@ -102,7 +236,65 @@ export default function WhatsApp() {
     }
   };
 
-  // Helper: render a credential input field
+  // Manual chat reply
+  const sendManualReply = async () => {
+    if (!replyText.trim() || !activeId || sending) return;
+    setSending(true);
+    const [data, err] = await safeFetch(`${API}/conversations/${activeId}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: replyText.trim() }),
+    });
+    setSending(false);
+    if (data?.success) {
+      showToast('Message sent! AI paused for this contact.', 'success');
+      setReplyText('');
+      fetchMessages(activeId);
+      fetchConversations();
+    } else {
+      showToast(data?.error || err || 'Failed to send message', 'error');
+      fetchMessages(activeId);
+    }
+  };
+
+  // Toggle AI takeover for active conversation
+  const toggleAI = async () => {
+    if (!activeId) return;
+    const isHandover = activeLead?.lead_status === 'handover';
+    const newStatus = isHandover ? 'warm' : 'handover';
+    const [data, err] = await safeFetch(`${API}/conversations/${activeId}/lead-status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: newStatus }),
+    });
+    if (data?.success) {
+      showToast(newStatus === 'handover' ? '👤 AI Paused — You are in manual control' : '🤖 AI Resumed — Bot will reply automatically', 'success');
+      fetchConversations();
+    } else {
+      showToast(err || 'Failed to toggle AI mode', 'error');
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendManualReply();
+    }
+  };
+
+  const activeConv = conversations.find(c => c.id === activeId);
+  const activeLead = activeConv?.lead;
+  const isHandover = activeLead?.lead_status === 'handover';
+
+  const filteredConversations = conversations.filter(c => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    const name = (c.lead?.name || '').toLowerCase();
+    const phone = (c.lead?.phone_number || '');
+    const lastMsg = (c.last_message || '').toLowerCase();
+    return name.includes(q) || phone.includes(q) || lastMsg.includes(q);
+  });
+
   const CredField = ({ label, field, placeholder, hint, type = 'text', required = false }) => (
     <div className="form-group" style={{ marginBottom: 14 }}>
       <label className="form-label" style={{ fontSize: 12, fontWeight: 600 }}>{label} {required && <span style={{ color: 'var(--danger)' }}>*</span>}</label>
@@ -111,254 +303,816 @@ export default function WhatsApp() {
     </div>
   );
 
-  if (loading) return <div className="loading"><div className="spinner"></div>Loading WhatsApp status...</div>;
+  if (loading) {
+    return <div className="loading"><div className="spinner"></div>Connecting to WhatsApp services...</div>;
+  }
 
-  return (<>
-    <h2 style={{ fontSize: 22, fontWeight: 700, marginBottom: 4 }}>WhatsApp Connection</h2>
-    <p style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 24 }}>Choose your connection method and manage settings</p>
-
-    {/* ── MODE SELECTOR ── */}
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
-      <div onClick={() => switchMode('qr')} style={{ padding: '20px', borderRadius: 12, border: `2px solid ${currentMode === 'qr' ? 'var(--accent)' : 'var(--border-color)'}`, background: currentMode === 'qr' ? 'rgba(16,185,129,0.08)' : 'var(--bg-secondary)', cursor: 'pointer', transition: 'all 0.3s', textAlign: 'center' }}>
-        <div style={{ fontSize: 32, marginBottom: 8 }}>📱</div>
-        <div style={{ fontSize: 15, fontWeight: 700, color: currentMode === 'qr' ? 'var(--accent)' : 'var(--text-primary)' }}>QR Code Scan</div>
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>WhatsApp Web — Easy setup, scan & go</div>
-        {currentMode === 'qr' && <div style={{ marginTop: 8, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>✓ Active</div>}
-      </div>
-      <div onClick={() => switchMode('cloud_api')} style={{ padding: '20px', borderRadius: 12, border: `2px solid ${currentMode === 'cloud_api' ? 'var(--accent)' : 'var(--border-color)'}`, background: currentMode === 'cloud_api' ? 'rgba(16,185,129,0.08)' : 'var(--bg-secondary)', cursor: 'pointer', transition: 'all 0.3s', textAlign: 'center' }}>
-        <div style={{ fontSize: 32, marginBottom: 8 }}>☁️</div>
-        <div style={{ fontSize: 15, fontWeight: 700, color: currentMode === 'cloud_api' ? 'var(--accent)' : 'var(--text-primary)' }}>Cloud API (Official)</div>
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>Meta Business API — No ban risk, production-grade</div>
-        {currentMode === 'cloud_api' && <div style={{ marginTop: 8, fontSize: 11, color: 'var(--accent)', fontWeight: 600 }}>✓ Active</div>}
-      </div>
-    </div>
-
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-      {/* ── LEFT COLUMN: CONNECTION ── */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {currentMode === 'qr' ? (
-          /* QR MODE */
-          <div className="card" style={{ textAlign: 'center' }}>
-            <div className="card-header" style={{ textAlign: 'center' }}>WhatsApp Web Connection</div>
-            {status.connected ? (<div style={{ padding: '30px 0' }}><div style={{ fontSize: 48, marginBottom: 12 }}>✅</div><div style={{ fontSize: 16, fontWeight: 700, color: 'var(--success)', marginBottom: 6 }}>Connected</div>{status.info && <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{status.info.pushname || 'WhatsApp User'}</div>}</div>) : (<>
-              <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16, marginTop: 8 }}>Scan this QR code with WhatsApp on your phone to connect.</p>
-              {qrImage ? <div style={{ marginBottom: 16 }}><img src={qrImage} alt="QR" style={{ width: 220, height: 220, borderRadius: 8, border: '2px solid var(--border-color)' }} /></div> :
-              <div style={{ width: 220, height: 220, margin: '0 auto 16px', borderRadius: 8, border: '2px dashed var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', color: 'var(--text-tertiary)', fontSize: 13 }}><div style={{ fontSize: 28, marginBottom: 8 }}>📱</div>{status.error ? <span style={{ color: 'var(--danger)', fontSize: 12, maxWidth: 160, textAlign: 'center' }}>{status.error}</span> : 'Waiting for QR code...'}</div>}
-            </>)}
-            <button className="btn btn-primary" onClick={() => { fetchQR(); checkStatus(); }} style={{ marginBottom: 10 }}>Generate QR Code</button>
-            <div style={{ fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.8, marginTop: 12 }}>1. Open WhatsApp on your phone<br/>2. Go to Settings → Linked Devices<br/>3. Tap "Link a Device" and scan</div>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 20, flexWrap: 'wrap' }}>
-              {status.connected && <button className="btn btn-danger" onClick={disconnect}>Disconnect & Change Number</button>}
-              <button className="btn btn-secondary" onClick={restart}>🔄 Restart</button>
-              <button className="btn btn-secondary" onClick={checkStatus}>↻ Refresh</button>
-            </div>
+  return (
+    <div style={{ margin: '-24px -28px', height: 'calc(100vh - 56px)', display: 'flex', flexDirection: 'column' }}>
+      
+      {/* ── TOP NAV BAR: TABS & LIVE STATUS ── */}
+      <div style={{
+        padding: '10px 24px',
+        borderBottom: '1px solid var(--border-color)',
+        background: 'var(--bg-secondary)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        flexShrink: 0
+      }}>
+        {/* Left: Tab selection */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div
+            onClick={() => setActiveTab('web')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 14px',
+              borderRadius: 8,
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+              background: activeTab === 'web' ? 'rgba(16,185,129,0.15)' : 'transparent',
+              color: activeTab === 'web' ? 'var(--accent)' : 'var(--text-secondary)',
+              border: activeTab === 'web' ? '1px solid rgba(16,185,129,0.3)' : '1px solid transparent',
+              transition: 'all 0.2s',
+            }}
+          >
+            <span>💬 WhatsApp Web</span>
+            {status.connected && (
+              <span style={{ fontSize: 10, background: 'var(--accent)', color: '#000', padding: '1px 6px', borderRadius: 10, fontWeight: 700 }}>
+                {conversations.length}
+              </span>
+            )}
           </div>
-        ) : (
-          /* CLOUD API MODE — n8n-style credentials form */
-          <>
-            <div className="card">
-              <div className="card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span>☁️ WhatsApp Cloud API Credentials</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: status.connected ? 'var(--success)' : 'var(--danger)' }}></span>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: status.connected ? 'var(--success)' : 'var(--text-tertiary)' }}>{status.connected ? 'Connected' : 'Not Connected'}</span>
-                </div>
+
+          <div
+            onClick={() => setActiveTab('settings')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '6px 14px',
+              borderRadius: 8,
+              cursor: 'pointer',
+              fontSize: 13,
+              fontWeight: 600,
+              background: activeTab === 'settings' ? 'rgba(99,102,241,0.15)' : 'transparent',
+              color: activeTab === 'settings' ? '#818cf8' : 'var(--text-secondary)',
+              border: activeTab === 'settings' ? '1px solid rgba(99,102,241,0.3)' : '1px solid transparent',
+              transition: 'all 0.2s',
+            }}
+          >
+            <span>⚙️ Settings & Automation</span>
+          </div>
+        </div>
+
+        {/* Right: Live Connection Status */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {status.connected ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', background: 'rgba(16,185,129,0.1)', borderRadius: 20, border: '1px solid rgba(16,185,129,0.3)' }}>
+                <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--success)', boxShadow: '0 0 8px var(--success)' }}></span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--success)' }}>
+                  {status.info?.pushname || 'Connected'} {status.info?.phone ? `(+${status.info.phone})` : ''}
+                </span>
               </div>
-
-              {/* Connected info banner */}
-              {status.connected && status.info && (
-                <div style={{ padding: '10px 14px', marginBottom: 16, borderRadius: 8, background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.2)' }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--success)' }}>✅ {status.info.pushname || 'WhatsApp Business'}</div>
-                  {status.info.phone_number && <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>📞 {status.info.phone_number}</div>}
-                </div>
-              )}
-
-              <CredField label="Access Token" field="wa_access_token" type="password" placeholder="EAAxxxxxxx..." required
-                hint="System User → Generate Token → Select WhatsApp app → whatsapp_business_messaging permission" />
-              <CredField label="App ID" field="wa_app_id" placeholder="e.g. 1234567890123" required
-                hint="Meta Developer Dashboard → Your App → Settings → Basic → App ID" />
-              <CredField label="App Secret" field="wa_app_secret" type="password" placeholder="e.g. abc123def456..." required
-                hint="Meta Developer Dashboard → Your App → Settings → Basic → App Secret" />
-              <CredField label="Phone Number ID" field="wa_phone_number_id" placeholder="e.g. 1234567890" required
-                hint="WhatsApp → API Setup → Phone Number ID (not the phone number itself)" />
-              <CredField label="WhatsApp Business Account ID" field="wa_business_account_id" placeholder="e.g. 1234567890" required
-                hint="WhatsApp → API Setup → WhatsApp Business Account ID" />
-
-              <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: 14, marginTop: 4 }}>
-                <CredField label="Webhook Verify Token" field="wa_verify_token" placeholder="Any secret string you choose"
-                  hint="You create this — enter the same token in Meta's webhook config" />
-              </div>
-
-              <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
-                <button className="btn btn-primary" onClick={testCloudConnection} disabled={testing || saving} style={{ flex: 1 }}>
-                  {testing ? '🔄 Testing...' : saving ? '💾 Saving...' : '🔍 Save & Test Connection'}
-                </button>
-                <button className="btn btn-secondary" onClick={saveCloudSettings} disabled={saving}>
-                  {saving ? '...' : '💾 Save Only'}
-                </button>
-              </div>
+              <button
+                onClick={disconnect}
+                className="btn btn-secondary"
+                style={{ fontSize: 11, padding: '4px 10px', color: 'var(--danger)', borderColor: 'rgba(239,68,68,0.3)' }}
+                title="Disconnect session"
+              >
+                Disconnect
+              </button>
             </div>
+          ) : (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: 'var(--danger)' }}></span>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--danger)' }}>
+                {status.state === 'authenticating' ? 'Authenticating...' : status.state === 'syncing' ? 'Syncing chats...' : 'WhatsApp Offline'}
+              </span>
+              <button onClick={restart} className="btn btn-secondary" style={{ fontSize: 11, padding: '4px 10px' }}>
+                🔄 Restart
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
 
-            {/* TEST RESULTS */}
-            {testResult && !testResult.loading && (
-              <div className="card" style={{ border: `1px solid ${testResult.success ? 'var(--success)' : 'var(--danger)'}` }}>
-                <div className="card-header" style={{ color: testResult.success ? 'var(--success)' : 'var(--danger)' }}>
-                  {testResult.success ? '✅ Connection Successful!' : '❌ Connection Failed'}
-                </div>
+      {/* ── TAB CONTENT ── */}
+      <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
-                {/* Step-by-step checks */}
-                {testResult.checks && testResult.checks.length > 0 && (
-                  <div style={{ marginBottom: 14 }}>
-                    {testResult.checks.map((c, i) => (
-                      <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, padding: '8px 0', borderBottom: '1px solid var(--border-color)' }}>
-                        <span style={{ fontSize: 14, flexShrink: 0 }}>{c.status?.startsWith('✅') ? '✅' : '❌'}</span>
-                        <div>
-                          <div style={{ fontSize: 12, fontWeight: 600 }}>{c.step}</div>
-                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{c.detail}</div>
-                          {c.quality && <div style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>Quality: {c.quality}</div>}
-                          {c.warning && <div style={{ fontSize: 10, color: 'var(--warning, #f59e0b)', fontWeight: 600 }}>⚠️ {c.warning}</div>}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+        {/* ═══════════════════════════════════════════════════════════
+            TAB 1: WHATSAPP WEB LIVE INTERFACE
+            ═══════════════════════════════════════════════════════════ */}
+        {activeTab === 'web' && (
+          <>
+            {/* If NOT CONNECTED: Hide chat section completely and show QR connect screen! */}
+            {!status.connected ? (
+              <div style={{
+                flex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'var(--bg-primary)',
+                padding: 24,
+              }}>
+                <div className="card" style={{ maxWidth: 520, width: '100%', textAlign: 'center', padding: '36px 32px' }}>
+                  <div style={{ fontSize: 44, marginBottom: 12 }}>📱</div>
+                  <h3 style={{ fontSize: 20, fontWeight: 700, marginBottom: 6 }}>Connect WhatsApp Web</h3>
+                  <p style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 24 }}>
+                    Scan this QR code with WhatsApp on your phone to link your account. Once connected, your active chats and AI automations will appear here.
+                  </p>
 
-                {/* Success details */}
-                {testResult.success && (
-                  <div style={{ padding: 12, borderRadius: 8, background: 'rgba(16,185,129,0.06)' }}>
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                      <div>📞 Phone: <strong>{testResult.phone_number}</strong></div>
-                      <div>🏢 Business: <strong>{testResult.business_name}</strong></div>
-                      <div>✨ Verified Name: <strong>{testResult.verified_name}</strong></div>
-                      <div>📊 Quality: <strong>{testResult.quality_rating}</strong></div>
-                    </div>
-                  </div>
-                )}
-
-                {/* Error details */}
-                {!testResult.success && testResult.error && (
-                  <div style={{ padding: 12, borderRadius: 8, background: 'rgba(239,68,68,0.06)' }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--danger)', marginBottom: 6 }}>
-                      Failed at: {testResult.step || 'Unknown'}
-                    </div>
-                    <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>{testResult.error}</div>
-                    {testResult.error_details && (
-                      <div style={{ fontSize: 11, padding: 10, background: 'var(--bg-secondary)', borderRadius: 6, fontFamily: 'monospace', lineHeight: 1.8 }}>
-                        {testResult.error_details.http_status && <div>HTTP Status: <strong>{testResult.error_details.http_status}</strong></div>}
-                        {testResult.error_details.code && <div>Error Code: <strong>{testResult.error_details.code}</strong></div>}
-                        {testResult.error_details.type && <div>Error Type: <strong>{testResult.error_details.type}</strong></div>}
-                        {testResult.error_details.message && <div>Message: <strong>{testResult.error_details.message}</strong></div>}
-                        {testResult.error_details.subcode && <div>Subcode: <strong>{testResult.error_details.subcode}</strong></div>}
-                        {testResult.error_details.fbtrace_id && <div>Trace ID: <strong>{testResult.error_details.fbtrace_id}</strong></div>}
+                  {/* QR Box with Live State */}
+                  <div style={{
+                    width: 256,
+                    height: 256,
+                    margin: '0 auto 20px',
+                    borderRadius: 14,
+                    border: '2px solid var(--border-color)',
+                    background: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    position: 'relative',
+                    overflow: 'hidden',
+                  }}>
+                    {qrImage ? (
+                      <img src={qrImage} alt="WhatsApp QR Code" style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10, color: '#333' }}>
+                        <div className="spinner" style={{ borderColor: 'rgba(16,185,129,0.3)', borderTopColor: 'var(--accent)' }}></div>
+                        <span style={{ fontSize: 12, fontWeight: 600, color: '#4b5563' }}>
+                          {status.state === 'authenticating' ? 'Authenticating with phone...' :
+                           status.state === 'syncing' ? `Syncing chats ${status.loading?.percent ? `${status.loading.percent}%` : '...'}` :
+                           'Generating QR code...'}
+                        </span>
                       </div>
                     )}
                   </div>
-                )}
-              </div>
-            )}
 
-            {/* WEBHOOK SETUP */}
-            <div className="card">
-              <div className="card-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span>🔗 Webhook Setup</span>
-                <button className="btn btn-secondary" style={{ fontSize: 10, padding: '4px 10px' }} onClick={checkWebhookStatus}>Check Status</button>
-              </div>
+                  {/* Status Banner */}
+                  {status.state === 'authenticating' && (
+                    <div style={{ padding: '8px 14px', marginBottom: 16, borderRadius: 8, background: 'rgba(16,185,129,0.1)', color: 'var(--success)', fontSize: 13, fontWeight: 600 }}>
+                      ✅ Device scanned! Logging into WhatsApp Web...
+                    </div>
+                  )}
 
-              {/* Webhook status */}
-              {webhookStatus && (
-                <div style={{ padding: '8px 12px', marginBottom: 12, borderRadius: 6, background: webhookStatus.subscribed ? 'rgba(16,185,129,0.08)' : 'rgba(239,68,68,0.08)', border: `1px solid ${webhookStatus.subscribed ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)'}` }}>
-                  {webhookStatus.subscribed ? (
+                  {status.state === 'syncing' && (
+                    <div style={{ padding: '8px 14px', marginBottom: 16, borderRadius: 8, background: 'rgba(99,102,241,0.1)', color: '#818cf8', fontSize: 13, fontWeight: 600 }}>
+                      ⏳ Loading chats and messages ({status.loading?.percent || 0}%)... Please wait.
+                    </div>
+                  )}
+
+                  {status.error && (
+                    <div style={{ padding: '8px 14px', marginBottom: 16, borderRadius: 8, background: 'rgba(239,68,68,0.1)', color: 'var(--danger)', fontSize: 12 }}>
+                      ⚠️ {status.error}
+                    </div>
+                  )}
+
+                  {/* Instructions */}
+                  <div style={{
+                    fontSize: 12,
+                    color: 'var(--text-tertiary)',
+                    lineHeight: 1.8,
+                    textAlign: 'left',
+                    background: 'var(--bg-secondary)',
+                    padding: '14px 18px',
+                    borderRadius: 8,
+                    marginBottom: 20
+                  }}>
+                    <strong>How to connect:</strong><br />
+                    1. Open <strong>WhatsApp</strong> on your phone<br />
+                    2. Tap <strong>Menu ⋮</strong> or <strong>Settings ⚙️</strong> → <strong>Linked Devices</strong><br />
+                    3. Tap <strong>Link a Device</strong> and point your camera at this QR code
+                  </div>
+
+                  {/* Action buttons */}
+                  <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                    <button className="btn btn-primary" onClick={() => { fetchQR(); checkStatus(); }}>
+                      ↻ Refresh QR
+                    </button>
+                    <button className="btn btn-secondary" onClick={restart}>
+                      🔄 Restart Bridge
+                    </button>
+                    <button className="btn btn-secondary" onClick={() => setActiveTab('settings')}>
+                      ⚙️ Setup Cloud API
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* CONNECTED: Full WhatsApp Web Interface */
+              <div className="split-pane" style={{ flex: 1 }}>
+                
+                {/* ── LEFT PANEL: CHATS LIST ── */}
+                <div className="split-left" style={{ width: 360, minWidth: 360, background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)' }}>
+                  {/* Search Header */}
+                  <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border-color)' }}>
+                    <div style={{ position: 'relative' }}>
+                      <input
+                        className="form-input"
+                        placeholder="🔍 Search name, number, or message..."
+                        value={search}
+                        onChange={e => setSearch(e.target.value)}
+                        style={{ fontSize: 12, padding: '9px 12px', borderRadius: 8, background: 'var(--bg-primary)' }}
+                      />
+                      {search && (
+                        <button
+                          onClick={() => setSearch('')}
+                          style={{ position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: 'var(--text-tertiary)', cursor: 'pointer', fontSize: 12 }}
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Conversations Scroll Area */}
+                  <div style={{ flex: 1, overflowY: 'auto', padding: '6px 8px' }}>
+                    {filteredConversations.length === 0 ? (
+                      <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: 13 }}>
+                        <div style={{ fontSize: 28, marginBottom: 8 }}>💬</div>
+                        {search ? 'No matching chats found' : 'No WhatsApp conversations yet. Incoming messages will appear here live!'}
+                      </div>
+                    ) : (
+                      filteredConversations.map(conv => {
+                        const lead = conv.lead || {};
+                        const isA = conv.id === activeId;
+                        const isHO = lead.lead_status === 'handover';
+                        const lastMsg = conv.last_message || 'No messages yet';
+                        const lastTime = conv.last_message_time || conv.created_at;
+                        const avatarBg = `hsl(${(lead.name || 'U').charCodeAt(0) * 43 % 360}, 65%, 45%)`;
+
+                        return (
+                          <div
+                            key={conv.id}
+                            onClick={() => setActiveId(conv.id)}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 12,
+                              padding: '12px 14px',
+                              borderRadius: 10,
+                              cursor: 'pointer',
+                              background: isA ? 'rgba(16,185,129,0.1)' : 'transparent',
+                              borderLeft: isA ? '3px solid var(--accent)' : '3px solid transparent',
+                              transition: 'all 0.15s ease',
+                              marginBottom: 4,
+                            }}
+                          >
+                            {/* Avatar */}
+                            <div style={{
+                              width: 44,
+                              height: 44,
+                              borderRadius: '50%',
+                              background: avatarBg,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              color: '#fff',
+                              fontWeight: 700,
+                              fontSize: 16,
+                              flexShrink: 0,
+                              boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
+                            }}>
+                              {(lead.name || '?')[0].toUpperCase()}
+                            </div>
+
+                            {/* Details */}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 2 }}>
+                                <span style={{ fontWeight: 600, fontSize: 13.5, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                  {lead.name && lead.name !== 'Unknown' ? lead.name : lead.phone_number}
+                                </span>
+                                <span style={{ fontSize: 11, color: isA ? 'var(--accent)' : 'var(--text-tertiary)', flexShrink: 0 }}>
+                                  {formatWhatsAppTime(lastTime)}
+                                </span>
+                              </div>
+
+                              {/* Phone number */}
+                              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 3 }}>
+                                {lead.phone_number}
+                              </div>
+
+                              {/* Last Message Snippet */}
+                              <div style={{
+                                fontSize: 12,
+                                color: isA ? 'var(--text-primary)' : 'var(--text-secondary)',
+                                whiteSpace: 'nowrap',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 4,
+                              }}>
+                                {conv.last_sender_type === 'ai' && <span style={{ color: 'var(--accent)', fontWeight: 600 }}>🤖 AI: </span>}
+                                {conv.last_sender_type === 'human' && <span style={{ color: 'var(--warning)', fontWeight: 600 }}>👤 You: </span>}
+                                <span>{lastMsg}</span>
+                              </div>
+
+                              {/* Badges */}
+                              <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
+                                <span className={`lead-badge ${lead.lead_status || 'new'}`} style={{ fontSize: 9, padding: '1px 7px' }}>
+                                  <span className="badge-dot" style={{ width: 4, height: 4 }}></span>
+                                  {(lead.lead_status || 'new').toUpperCase()}
+                                </span>
+                                {isHO ? (
+                                  <span style={{ fontSize: 9, color: 'var(--warning, #f59e0b)', fontWeight: 700, background: 'rgba(245,158,11,0.15)', padding: '1px 6px', borderRadius: 4 }}>
+                                    👤 MANUAL
+                                  </span>
+                                ) : (
+                                  <span style={{ fontSize: 9, color: 'var(--accent)', fontWeight: 700, background: 'rgba(16,185,129,0.15)', padding: '1px 6px', borderRadius: 4 }}>
+                                    🤖 AI ACTIVE
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                {/* ── RIGHT PANEL: ACTIVE CHAT THREAD ── */}
+                <div className="split-right" style={{ background: 'var(--bg-primary)', display: 'flex', flexDirection: 'column' }}>
+                  {activeLead ? (
                     <>
-                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--success)' }}>✅ Webhook Subscribed</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>URL: {webhookStatus.callback_url}</div>
-                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Fields: {(webhookStatus.fields || []).join(', ')}</div>
+                      {/* Active Chat Header */}
+                      <div style={{
+                        padding: '12px 20px',
+                        borderBottom: '1px solid var(--border-color)',
+                        background: 'var(--bg-secondary)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        flexShrink: 0,
+                      }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <div style={{
+                            width: 42,
+                            height: 42,
+                            borderRadius: '50%',
+                            background: `hsl(${(activeLead.name || 'U').charCodeAt(0) * 43 % 360}, 65%, 45%)`,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#fff',
+                            fontWeight: 700,
+                            fontSize: 16,
+                          }}>
+                            {(activeLead.name || '?')[0].toUpperCase()}
+                          </div>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 14.5 }}>
+                              {activeLead.name || 'Unknown Contact'}
+                            </div>
+                            <div style={{ fontSize: 11.5, color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span>📞 {activeLead.phone_number}</span>
+                              <span>•</span>
+                              <span style={{ color: 'var(--success)' }}>🟢 WhatsApp Connected</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Controls */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <span className={`lead-badge ${activeLead.lead_status}`}>
+                            <span className="badge-dot"></span>
+                            {(activeLead.lead_status || 'new').toUpperCase()} {activeLead.lead_score ? `• ${activeLead.lead_score} pts` : ''}
+                          </span>
+                          <button
+                            onClick={toggleAI}
+                            className={`btn ${isHandover ? 'btn-primary' : 'btn-danger'}`}
+                            style={{ fontSize: 11, padding: '6px 14px', fontWeight: 600 }}
+                          >
+                            {isHandover ? '🤖 Resume AI' : '👤 Take Over'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Handover Notice Banner */}
+                      {isHandover && (
+                        <div style={{
+                          padding: '8px 20px',
+                          background: 'rgba(251,191,36,0.1)',
+                          borderBottom: '1px solid rgba(251,191,36,0.25)',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          flexShrink: 0
+                        }}>
+                          <div style={{ fontSize: 12, color: 'var(--warning, #f59e0b)', fontWeight: 600 }}>
+                            👤 You are currently in manual control — AI auto-replies are paused for this customer.
+                          </div>
+                          <button
+                            onClick={toggleAI}
+                            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 11, fontWeight: 700, textDecoration: 'underline' }}
+                          >
+                            Resume AI
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Chat Messages Body */}
+                      <div style={{
+                        flex: 1,
+                        overflowY: 'auto',
+                        padding: '20px 24px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 12,
+                        backgroundImage: 'radial-gradient(rgba(99,102,241,0.04) 1px, transparent 1px)',
+                        backgroundSize: '24px 24px',
+                      }}>
+                        {loadingMessages ? (
+                          <div className="loading" style={{ margin: 'auto' }}><div className="spinner"></div>Loading messages...</div>
+                        ) : messages.length === 0 ? (
+                          <div style={{ textAlign: 'center', margin: 'auto', color: 'var(--text-tertiary)', fontSize: 13 }}>
+                            No messages exchanged yet with this contact.
+                          </div>
+                        ) : (
+                          messages.map((msg, index) => {
+                            const isAI = msg.sender_type === 'ai';
+                            const isHuman = msg.sender_type === 'human';
+                            const isOut = isAI || isHuman;
+
+                            return (
+                              <div
+                                key={msg.id || index}
+                                style={{
+                                  display: 'flex',
+                                  flexDirection: 'column',
+                                  alignItems: isOut ? 'flex-end' : 'flex-start',
+                                  marginBottom: 4,
+                                }}
+                              >
+                                {/* Sender Tag */}
+                                {isAI && (
+                                  <div style={{ fontSize: 10, color: 'var(--accent)', marginBottom: 3, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    🤖 FlowBot AI
+                                  </div>
+                                )}
+                                {isHuman && (
+                                  <div style={{ fontSize: 10, color: 'var(--warning)', marginBottom: 3, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                    👤 Agent (Manual)
+                                  </div>
+                                )}
+
+                                {/* Message Bubble */}
+                                <div style={{
+                                  maxWidth: '70%',
+                                  padding: '10px 16px',
+                                  borderRadius: isOut ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                                  background: isAI
+                                    ? 'linear-gradient(135deg, #059669, #10b981)'
+                                    : isHuman
+                                    ? 'linear-gradient(135deg, #d97706, #f59e0b)'
+                                    : 'var(--bg-card)',
+                                  color: isOut ? '#ffffff' : 'var(--text-primary)',
+                                  fontSize: 13.5,
+                                  lineHeight: 1.5,
+                                  border: isOut ? 'none' : '1px solid var(--border-color)',
+                                  boxShadow: isOut ? '0 2px 8px rgba(16,185,129,0.2)' : '0 2px 6px rgba(0,0,0,0.1)',
+                                  wordBreak: 'break-word',
+                                  whiteSpace: 'pre-wrap',
+                                }}>
+                                  {msg.message_text}
+                                </div>
+
+                                {/* Timestamp + Delivery indicator */}
+                                <div style={{
+                                  fontSize: 10,
+                                  color: 'var(--text-tertiary)',
+                                  marginTop: 3,
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 4,
+                                }}>
+                                  <span>{formatTime(msg.created_at)}</span>
+                                  {isOut && <span style={{ color: 'var(--accent)', fontSize: 12 }}>✓✓</span>}
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                        <div ref={chatEndRef}></div>
+                      </div>
+
+                      {/* Reply Input Bar */}
+                      <div style={{
+                        padding: '14px 20px',
+                        borderTop: '1px solid var(--border-color)',
+                        background: 'var(--bg-secondary)',
+                        flexShrink: 0
+                      }}>
+                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-end' }}>
+                          <textarea
+                            ref={inputRef}
+                            className="form-input"
+                            placeholder="Type a message... (Press Enter to send, Shift+Enter for new line)"
+                            value={replyText}
+                            onChange={e => setReplyText(e.target.value)}
+                            onKeyDown={handleKeyDown}
+                            rows={1}
+                            style={{
+                              flex: 1,
+                              resize: 'none',
+                              minHeight: 44,
+                              maxHeight: 120,
+                              fontFamily: 'inherit',
+                              fontSize: 13,
+                              padding: '10px 14px',
+                            }}
+                          />
+                          <button
+                            className="btn btn-primary"
+                            onClick={sendManualReply}
+                            disabled={sending || !replyText.trim()}
+                            style={{ height: 44, minWidth: 90, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                          >
+                            {sending ? <div className="spinner" style={{ width: 14, height: 14 }}></div> : '📩 Send'}
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 8 }}>
+                          {isHandover
+                            ? '👤 Replying manually. Click "Resume AI" above whenever you want the bot to take over.'
+                            : '⚡ Sending a manual reply will automatically pause the AI bot for this contact.'}
+                        </div>
+                      </div>
                     </>
                   ) : (
-                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--danger)' }}>❌ {webhookStatus.error || 'Not subscribed'}</div>
+                    <div className="empty-state" style={{ margin: 'auto' }}>
+                      <div className="empty-icon">💬</div>
+                      <h4 style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>Select a Conversation</h4>
+                      <p>Pick a chat from the left panel to view WhatsApp messages and reply directly.</p>
+                    </div>
                   )}
                 </div>
-              )}
-
-              <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>Enter your <strong>public HTTPS URL</strong> where Meta will send messages. Use ngrok for local dev.</p>
-
-              <div className="form-group" style={{ marginBottom: 10 }}>
-                <label className="form-label" style={{ fontSize: 11 }}>Webhook Callback URL (must be HTTPS)</label>
-                <input className="form-input" placeholder="https://your-domain.com/api/whatsapp/cloud/webhook" value={customWebhookUrl} onChange={e => setCustomWebhookUrl(e.target.value)} style={{ fontFamily: 'monospace', fontSize: 12 }} />
-                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 3 }}>Use ngrok: <code style={{ background: 'var(--bg-secondary)', padding: '1px 4px', borderRadius: 3 }}>ngrok http 8000</code> → copy the https URL + <code>/api/whatsapp/cloud/webhook</code></div>
               </div>
-
-              <button className="btn btn-primary" onClick={subscribeWebhook} disabled={subscribing} style={{ width: '100%' }}>
-                {subscribing ? '🔄 Subscribing...' : '🔗 Subscribe Webhook with Meta'}
-              </button>
-
-              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 10, padding: 10, background: 'var(--bg-secondary)', borderRadius: 6, lineHeight: 1.8 }}>
-                <strong>Steps:</strong><br/>
-                1. Run <code>ngrok http 8000</code> in terminal<br/>
-                2. Copy the <code>https://xxxx.ngrok.io</code> URL<br/>
-                3. Add <code>/api/whatsapp/cloud/webhook</code> to it<br/>
-                4. Paste above and click Subscribe<br/>
-                5. Done! Messages will start flowing in 🎉
-              </div>
-            </div>
+            )}
           </>
         )}
-      </div>
 
-      {/* ── RIGHT COLUMN: SETTINGS ── */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        <div className="card">
-          <div className="card-header">Reply Settings</div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
-            <div><div style={{ fontSize: 13, fontWeight: 600 }}>Reply to Group Messages</div><div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>AI will respond in WhatsApp groups</div></div>
-            <div onClick={toggleGroupReplies} style={{ width: 44, height: 24, borderRadius: 12, background: aiSettings?.group_replies ? 'var(--accent)' : 'var(--border-color)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}><div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff', position: 'absolute', top: 3, left: aiSettings?.group_replies ? 23 : 3, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} /></div>
-          </div>
-          <div style={{ fontSize: 11, color: aiSettings?.group_replies ? 'var(--success)' : 'var(--text-tertiary)', marginTop: 8, fontWeight: 600, marginBottom: 16, paddingBottom: 16, borderBottom: '1px solid var(--border-color)' }}>{aiSettings?.group_replies ? '🟢 Group replies are ON' : '⚫ Group replies are OFF'}</div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
-            <div><div style={{ fontSize: 13, fontWeight: 600 }}>Reply to Saved Contacts</div><div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>When OFF, AI only replies to new/unsaved numbers</div></div>
-            <div onClick={async () => { const v = aiSettings?.reply_to_contacts ? 0 : 1; const ok = await updateAISetting({ reply_to_contacts: v }); if (ok) showToast(v ? 'Replying to all' : 'Only new numbers', 'success'); }} style={{ width: 44, height: 24, borderRadius: 12, background: aiSettings?.reply_to_contacts ? 'var(--accent)' : 'var(--border-color)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}><div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff', position: 'absolute', top: 3, left: aiSettings?.reply_to_contacts ? 23 : 3, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} /></div>
-          </div>
-          <div style={{ fontSize: 11, color: aiSettings?.reply_to_contacts ? 'var(--success)' : 'var(--warning, #f59e0b)', marginTop: 8, fontWeight: 600 }}>{aiSettings?.reply_to_contacts ? '🟢 Replying to everyone' : '🟡 Only new/unsaved numbers'}</div>
-        </div>
-        <div className="card">
-          <div className="card-header">Reply Delay</div>
-          <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>Delay before bot replies to look more human{currentMode === 'qr' ? ' and avoid bans' : ''}.</div>
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {[0, 3, 5, 10, 15, 30].map(s => (
-              <div key={s} onClick={async () => { const ok = await updateAISetting({ reply_delay: s }); if (ok) showToast(`Delay: ${s}s`, 'success'); }} style={{ padding: '8px 16px', borderRadius: 8, border: `2px solid ${(aiSettings?.reply_delay || 0) === s ? 'var(--accent)' : 'var(--border-color)'}`, background: (aiSettings?.reply_delay || 0) === s ? 'rgba(16,185,129,0.1)' : 'var(--bg-primary)', color: (aiSettings?.reply_delay || 0) === s ? 'var(--accent)' : 'var(--text-secondary)', cursor: 'pointer', fontSize: 13, fontWeight: 600, transition: 'all 0.2s' }}>{s === 0 ? 'Instant' : `${s}s`}</div>
-            ))}
-          </div>
-          <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 10 }}>Current: <strong style={{ color: 'var(--text-primary)' }}>{(aiSettings?.reply_delay || 0) === 0 ? 'No delay' : `${aiSettings?.reply_delay}s`}</strong></div>
-        </div>
-        {currentMode === 'qr' && (
-          <div className="card">
-            <div className="card-header">Typing Indicator</div>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
-              <div><div style={{ fontSize: 13, fontWeight: 600 }}>Show "typing..." to Customer</div><div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>Shows typing animation during reply delay</div></div>
-              <div onClick={async () => { const v = aiSettings?.typing_indicator ? 0 : 1; const ok = await updateAISetting({ typing_indicator: v }); if (ok) showToast(v ? 'Typing ON' : 'Typing OFF', 'success'); }} style={{ width: 44, height: 24, borderRadius: 12, background: aiSettings?.typing_indicator ? 'var(--accent)' : 'var(--border-color)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}><div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff', position: 'absolute', top: 3, left: aiSettings?.typing_indicator ? 23 : 3, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} /></div>
-            </div>
-            <div style={{ fontSize: 11, color: aiSettings?.typing_indicator ? 'var(--success)' : 'var(--text-tertiary)', marginTop: 8, fontWeight: 600 }}>{aiSettings?.typing_indicator ? '🟢 Typing indicator ON' : '⚫ Typing indicator OFF'}</div>
-          </div>
-        )}
-        <div className="card">
-          <div className="card-header">Auto Handover to Human</div>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
-            <div><div style={{ fontSize: 13, fontWeight: 600 }}>Stop AI after set replies</div><div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>AI stops replying after a set number of messages</div></div>
-            <div onClick={async () => { const v = aiSettings?.auto_handover ? 0 : 1; const ok = await updateAISetting({ auto_handover: v }); if (ok) showToast(v ? 'Handover ON' : 'Handover OFF', 'success'); }} style={{ width: 44, height: 24, borderRadius: 12, background: aiSettings?.auto_handover ? 'var(--accent)' : 'var(--border-color)', cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0 }}><div style={{ width: 18, height: 18, borderRadius: '50%', background: '#fff', position: 'absolute', top: 3, left: aiSettings?.auto_handover ? 23 : 3, transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }} /></div>
-          </div>
-          <div style={{ fontSize: 11, color: aiSettings?.auto_handover ? 'var(--success)' : 'var(--text-tertiary)', marginTop: 8, fontWeight: 600 }}>{aiSettings?.auto_handover ? '🟢 Auto handover ON' : '⚫ Auto handover OFF'}</div>
-          {aiSettings?.auto_handover ? (
-            <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
-              <label className="form-label" style={{ fontSize: 12 }}>Hand over after how many AI replies?</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
-                <input className="form-input" type="number" min="1" max="100" value={aiSettings?.handover_after || 10} onChange={e => setAiSettings({ ...aiSettings, handover_after: parseInt(e.target.value) || 10 })} style={{ width: 80, textAlign: 'center', fontSize: 14, fontWeight: 700 }} />
-                <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>replies</span>
-                <button className="btn btn-primary" style={{ fontSize: 11, padding: '6px 14px' }} onClick={async () => { const ok = await updateAISetting({ handover_after: aiSettings?.handover_after || 10 }); if (ok) showToast(`Handover after ${aiSettings?.handover_after || 10} replies`, 'success'); }}>Save</button>
+        {/* ═══════════════════════════════════════════════════════════
+            TAB 2: SETTINGS & AUTOMATION
+            ═══════════════════════════════════════════════════════════ */}
+        {activeTab === 'settings' && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 28px' }}>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>WhatsApp & AI Settings</h2>
+            <p style={{ fontSize: 13, color: 'var(--text-tertiary)', marginBottom: 20 }}>
+              Configure AI reply behaviors, connection mode, and response filters.
+            </p>
+
+            {/* Connection Mode Cards */}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 24 }}>
+              <div
+                onClick={() => switchMode('qr')}
+                style={{
+                  padding: '18px',
+                  borderRadius: 12,
+                  border: `2px solid ${currentMode === 'qr' ? 'var(--accent)' : 'var(--border-color)'}`,
+                  background: currentMode === 'qr' ? 'rgba(16,185,129,0.08)' : 'var(--bg-secondary)',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                }}
+              >
+                <div style={{ fontSize: 32, marginBottom: 6 }}>📱</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: currentMode === 'qr' ? 'var(--accent)' : 'var(--text-primary)' }}>
+                  WhatsApp Web (QR Scan)
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  Connect using any phone via QR Code
+                </div>
+                {currentMode === 'qr' && <div style={{ marginTop: 6, fontSize: 11, color: 'var(--accent)', fontWeight: 700 }}>✓ Active Mode</div>}
+              </div>
+
+              <div
+                onClick={() => switchMode('cloud_api')}
+                style={{
+                  padding: '18px',
+                  borderRadius: 12,
+                  border: `2px solid ${currentMode === 'cloud_api' ? 'var(--accent)' : 'var(--border-color)'}`,
+                  background: currentMode === 'cloud_api' ? 'rgba(16,185,129,0.08)' : 'var(--bg-secondary)',
+                  cursor: 'pointer',
+                  textAlign: 'center',
+                }}
+              >
+                <div style={{ fontSize: 32, marginBottom: 6 }}>☁️</div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: currentMode === 'cloud_api' ? 'var(--accent)' : 'var(--text-primary)' }}>
+                  Meta Cloud API (Official)
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  Official Meta WhatsApp Business Cloud API
+                </div>
+                {currentMode === 'cloud_api' && <div style={{ marginTop: 6, fontSize: 11, color: 'var(--accent)', fontWeight: 700 }}>✓ Active Mode</div>}
               </div>
             </div>
-          ) : null}
-        </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+              {/* Left Column: Cloud API Form / QR Control */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                {currentMode === 'cloud_api' ? (
+                  <div className="card">
+                    <div className="card-header">Meta Cloud API Credentials</div>
+                    <CredField label="Access Token" field="wa_access_token" type="password" placeholder="EAAxxxxxxx..." required />
+                    <CredField label="App ID" field="wa_app_id" placeholder="e.g. 1234567890123" required />
+                    <CredField label="App Secret" field="wa_app_secret" type="password" placeholder="e.g. abc123def456..." required />
+                    <CredField label="Phone Number ID" field="wa_phone_number_id" placeholder="e.g. 1234567890" required />
+                    <CredField label="WhatsApp Business Account ID" field="wa_business_account_id" placeholder="e.g. 1234567890" required />
+                    <CredField label="Webhook Verify Token" field="wa_verify_token" placeholder="Any secret string" />
+
+                    <div style={{ display: 'flex', gap: 10, marginTop: 10 }}>
+                      <button className="btn btn-primary" onClick={testCloudConnection} disabled={testing || saving} style={{ flex: 1 }}>
+                        {testing ? 'Testing...' : 'Save & Test'}
+                      </button>
+                      <button className="btn btn-secondary" onClick={saveCloudSettings} disabled={saving}>
+                        Save Only
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="card">
+                    <div className="card-header">WhatsApp Web Connection Status</div>
+                    <div style={{ padding: '14px 0', textAlign: 'center' }}>
+                      <div style={{ fontSize: 36, marginBottom: 8 }}>{status.connected ? '✅' : '🔴'}</div>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: status.connected ? 'var(--success)' : 'var(--danger)', marginBottom: 4 }}>
+                        {status.connected ? 'WhatsApp Web Connected' : 'WhatsApp Web Offline'}
+                      </div>
+                      {status.info && (
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                          User: <strong>{status.info.pushname}</strong> {status.info.phone ? `(+${status.info.phone})` : ''}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 10 }}>
+                      <button className="btn btn-secondary" onClick={restart}>🔄 Restart Bridge</button>
+                      <button className="btn btn-secondary" onClick={checkStatus}>↻ Refresh Status</button>
+                      {status.connected && (
+                        <button className="btn btn-danger" onClick={disconnect}>Disconnect</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Right Column: AI Automation Rules */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+                {/* Group replies & Saved Contacts */}
+                <div className="card">
+                  <div className="card-header">AI Reply Filters</div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0' }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Reply to Group Messages</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>Allow AI bot to respond in WhatsApp groups</div>
+                    </div>
+                    <div
+                      onClick={toggleGroupReplies}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12,
+                        background: aiSettings?.group_replies ? 'var(--accent)' : 'var(--border-color)',
+                        cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                      }}
+                    >
+                      <div style={{
+                        width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                        position: 'absolute', top: 3, left: aiSettings?.group_replies ? 23 : 3,
+                        transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                      }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: aiSettings?.group_replies ? 'var(--success)' : 'var(--text-tertiary)', marginTop: 6, fontWeight: 600, paddingBottom: 14, borderBottom: '1px solid var(--border-color)' }}>
+                    {aiSettings?.group_replies ? '🟢 Group replies enabled' : '⚫ Group replies disabled'}
+                  </div>
+
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 0 6px' }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Reply to Saved Contacts</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>When OFF, AI only replies to new/unsaved numbers</div>
+                    </div>
+                    <div
+                      onClick={async () => {
+                        const v = aiSettings?.reply_to_contacts ? 0 : 1;
+                        const ok = await updateAISetting({ reply_to_contacts: v });
+                        if (ok) showToast(v ? 'Replying to all numbers' : 'Only replying to new numbers', 'success');
+                      }}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12,
+                        background: aiSettings?.reply_to_contacts ? 'var(--accent)' : 'var(--border-color)',
+                        cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                      }}
+                    >
+                      <div style={{
+                        width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                        position: 'absolute', top: 3, left: aiSettings?.reply_to_contacts ? 23 : 3,
+                        transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                      }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: aiSettings?.reply_to_contacts ? 'var(--success)' : 'var(--warning)', marginTop: 6, fontWeight: 600 }}>
+                    {aiSettings?.reply_to_contacts ? '🟢 Replying to everyone' : '🟡 Only replying to new/unsaved numbers'}
+                  </div>
+                </div>
+
+                {/* Reply Delay */}
+                <div className="card">
+                  <div className="card-header">Human-Like Reply Delay</div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
+                    Adds a delay before sending replies to look authentic and avoid spam detection.
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                    {[0, 3, 5, 10, 15, 30].map(s => (
+                      <div
+                        key={s}
+                        onClick={async () => {
+                          const ok = await updateAISetting({ reply_delay: s });
+                          if (ok) showToast(`Delay set to ${s}s`, 'success');
+                        }}
+                        style={{
+                          padding: '7px 14px',
+                          borderRadius: 8,
+                          border: `2px solid ${(aiSettings?.reply_delay || 0) === s ? 'var(--accent)' : 'var(--border-color)'}`,
+                          background: (aiSettings?.reply_delay || 0) === s ? 'rgba(16,185,129,0.1)' : 'var(--bg-primary)',
+                          color: (aiSettings?.reply_delay || 0) === s ? 'var(--accent)' : 'var(--text-secondary)',
+                          cursor: 'pointer', fontSize: 12, fontWeight: 600, transition: 'all 0.2s'
+                        }}
+                      >
+                        {s === 0 ? 'Instant' : `${s}s`}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Auto Handover */}
+                <div className="card">
+                  <div className="card-header">Auto Handover to Human</div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Limit AI Messages Per Contact</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>Pause AI bot after a set message count for human takeover</div>
+                    </div>
+                    <div
+                      onClick={async () => {
+                        const v = aiSettings?.auto_handover ? 0 : 1;
+                        const ok = await updateAISetting({ auto_handover: v });
+                        if (ok) showToast(v ? 'Handover ON' : 'Handover OFF', 'success');
+                      }}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12,
+                        background: aiSettings?.auto_handover ? 'var(--accent)' : 'var(--border-color)',
+                        cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                      }}
+                    >
+                      <div style={{
+                        width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                        position: 'absolute', top: 3, left: aiSettings?.auto_handover ? 23 : 3,
+                        transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                      }} />
+                    </div>
+                  </div>
+                  {aiSettings?.auto_handover ? (
+                    <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--border-color)' }}>
+                      <label className="form-label" style={{ fontSize: 12 }}>Hand over after how many bot replies?</label>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}>
+                        <input
+                          className="form-input"
+                          type="number"
+                          min="1"
+                          max="100"
+                          value={aiSettings?.handover_after || 10}
+                          onChange={e => setAiSettings({ ...aiSettings, handover_after: parseInt(e.target.value) || 10 })}
+                          style={{ width: 80, textAlign: 'center', fontSize: 13, fontWeight: 700 }}
+                        />
+                        <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>replies</span>
+                        <button
+                          className="btn btn-primary"
+                          style={{ fontSize: 11, padding: '6px 14px' }}
+                          onClick={async () => {
+                            const ok = await updateAISetting({ handover_after: aiSettings?.handover_after || 10 });
+                            if (ok) showToast(`Handover set after ${aiSettings?.handover_after || 10} replies`, 'success');
+                          }}
+                        >
+                          Save
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
+
+      {toast && (
+        <div className={`toast toast-${toast.type}`} style={{ position: 'fixed', bottom: 20, right: 20, zIndex: 1000 }}>
+          {toast.type === 'success' ? '✅' : '❌'} {toast.message}
+        </div>
+      )}
     </div>
-    {toast && <div className={`toast toast-${toast.type}`}>{toast.type === 'success' ? '✅' : '❌'} {toast.message}</div>}
-  </>);
+  );
 }

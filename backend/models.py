@@ -18,6 +18,9 @@ class Business(Base):
     location = Column(String(255), default="")
     offers = Column(Text, default="")
     working_hours = Column(String(255), default="")
+    portal_token = Column(String(64), unique=True, index=True, nullable=True)
+    portal_pin = Column(String(20), nullable=True)
+    logo_url = Column(String(500), default="")
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
 
     leads = relationship("Lead", back_populates="business")
@@ -96,6 +99,14 @@ class AISetting(Base):
     auto_handover = Column(Integer, default=0)  # 0=off, 1=on
     handover_after = Column(Integer, default=10)  # number of AI replies before handover
 
+    # Automation Settings
+    reminder_enabled = Column(Integer, default=0)
+    reminder_time_mins = Column(Integer, default=30)
+    reminder_message_template = Column(Text, default="Hi {name}, this is a reminder for your appointment at ClinixGrow at {time}.")
+    feedback_enabled = Column(Integer, default=0)
+    feedback_time_mins = Column(Integer, default=120)
+    feedback_message_template = Column(Text, default="Hi {name}, thank you for your visit to ClinixGrow! Please share your feedback: [Link]")
+
     # WhatsApp connection mode: "qr" (whatsapp-web.js) or "cloud_api" (Meta Cloud API)
     wa_connection_mode = Column(String(20), default="qr")
     wa_app_id = Column(String(100), default="")              # Facebook App ID
@@ -166,6 +177,7 @@ class Appointment(Base):
     notes = Column(Text, default="")
     booked_by = Column(String(20), default="manual")  # "manual", "ai", "lead"
     reminder_sent = Column(Integer, default=0)  # 0=not sent, 1=sent
+    feedback_sent = Column(Integer, default=0)  # 0=not sent, 1=sent
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
 
     business = relationship("Business")

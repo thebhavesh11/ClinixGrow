@@ -71,6 +71,37 @@ export function scoreColor(score) {
 }
 
 /**
+ * Format a datetime into standard WhatsApp format (Today HH:MM, Yesterday, Weekday, or DD/MM/YY).
+ * @param {string|Date|number} dt - ISO date string, Date object, or epoch ms
+ */
+export function formatWhatsAppTime(dt) {
+  if (!dt) return '';
+  let d;
+  if (typeof dt === 'number') {
+    d = new Date(dt);
+  } else {
+    const dateStr = (typeof dt === 'string' && !dt.endsWith('Z') && !dt.includes('+')) ? dt + 'Z' : dt;
+    d = new Date(dateStr);
+  }
+  if (isNaN(d.getTime())) return '';
+
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const targetDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today - targetDate) / (1000 * 60 * 60 * 24));
+
+  if (diffDays === 0) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } else if (diffDays === 1) {
+    return 'Yesterday';
+  } else if (diffDays < 7) {
+    return d.toLocaleDateString([], { weekday: 'short' });
+  } else {
+    return d.toLocaleDateString([], { day: '2-digit', month: '2-digit', year: '2-digit' });
+  }
+}
+
+/**
  * Format a datetime to time string (HH:MM).
  * @param {string|Date} dt - ISO date string or Date object
  */

@@ -36,44 +36,37 @@ def _get_phone_lock(phone: str) -> asyncio.Lock:
 
 
 async def process_incoming_message(
-    phone: str, message: str, name: str, business_id: int, db: AsyncSession
+    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True
 ) -> dict:
     """Process an incoming WhatsApp message end-to-end (sequential per phone)."""
     lock = _get_phone_lock(phone)
     async with lock:
-        return await _process_message_inner(phone, message, name, business_id, db)
+        return await _process_message_inner(phone, message, name, business_id, db, reply_to, should_reply)
 
 
 async def _process_message_inner(
-    phone: str, message: str, name: str, business_id: int, db: AsyncSession
+    phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True
 ) -> dict:
     """Internal message processing — runs under per-phone lock."""
+    # 0. Do not create lead, conversation, or message if message is completely empty
+    if not message or not str(message).strip():
+        logger.info(f"[Engine] Ignoring empty message from {phone} (biz={business_id})")
+        return {"reply": None, "skipped": True}
 
-    # 1. Find or create lead
-    result = await db.execute(select(Lead).where(Lead.phone_number == phone))
+    # 1. Find or create lead (scoped to business)
+    result = await db.execute(
+        select(Lead).where(Lead.phone_number == phone, Lead.business_id == business_id)
+    )
     lead = result.scalar_one_or_none()
     if not lead:
         lead = Lead(phone_number=phone, name=name or "Unknown", business_id=business_id)
         db.add(lead)
         await db.flush()
         await db.refresh(lead)
-        logger.info(f"[Engine] Created new lead: {lead.name} ({lead.phone_number})")
-
-    # 1b. Check if lead is handed over — AI should not reply
-    if lead.lead_status == 'handover':
-        logger.info(f"[Engine] Lead {lead.phone_number} is handed over — skipping AI reply")
-        # Still save the incoming message
-        result = await db.execute(
-            select(Conversation).where(
-                Conversation.lead_id == lead.id,
-                Conversation.business_id == business_id,
-            )
-        )
-        conv = result.scalar_one_or_none()
-        if conv:
-            db.add(Message(conversation_id=conv.id, sender_type="customer", message_text=message))
-            await db.flush()
-        return {"reply": None, "lead_id": lead.id, "handover": True}
+        logger.info(f"[Engine] Created new lead for biz {business_id}: {lead.name} ({lead.phone_number})")
+    elif name and name != "Unknown" and (not lead.name or lead.name == "Unknown"):
+        lead.name = name
+        await db.flush()
 
     # 2. Find or create conversation
     result = await db.execute(
@@ -89,7 +82,7 @@ async def _process_message_inner(
         await db.flush()
         await db.refresh(conv)
 
-    # 3. Save incoming message
+    # 3. Save incoming message so it is ALWAYS visible in the UI
     customer_msg = Message(
         conversation_id=conv.id,
         sender_type="customer",
@@ -97,6 +90,16 @@ async def _process_message_inner(
     )
     db.add(customer_msg)
     await db.flush()
+
+    # 3b. Check if lead is handed over — AI should not reply
+    if lead.lead_status == 'handover':
+        logger.info(f"[Engine] Lead {lead.phone_number} is handed over — skipping AI reply")
+        return {"reply": None, "lead_id": lead.id, "handover": True}
+
+    # 3c. Check should_reply flag and message content
+    if not should_reply or not message.strip():
+        logger.info(f"[Engine] Message from {phone} saved for UI display; skipping AI reply (should_reply={should_reply}, has_text={bool(message.strip())})")
+        return {"reply": None, "lead_id": lead.id, "skipped": True}
 
     # 4. Get AI settings and business info
     result = await db.execute(select(AISetting).where(AISetting.business_id == business_id))
@@ -123,7 +126,26 @@ async def _process_message_inner(
     appt_context = await _build_appointment_context(db, business_id, lead.id)
     ai_reply = await generate_ai_reply(ai_settings, business, history, message, media_files, appt_context)
 
-    # 7. Parse [MEDIA:ID] tags and send media files
+    # 7. Parse [BOOK: Date | Time | Details] tags for appointments
+    book_match = re.search(r'\[BOOK:\s*([^|]+)\|\s*([^|]+)\|\s*([^\]]+)\]', ai_reply, re.IGNORECASE)
+    if book_match:
+        date_str, time_str, details = book_match.groups()
+        try:
+            new_appt = Appointment(
+                business_id=business_id,
+                lead_id=lead.id,
+                title=details.strip()[:100],
+                date=date_str.strip(),
+                start_time=time_str.strip(),
+                status="confirmed",
+                booked_by="ai"
+            )
+            db.add(new_appt)
+            ai_reply = re.sub(r'\s*\[BOOK:.*?\]\s*', ' ', ai_reply, flags=re.IGNORECASE).strip()
+        except Exception as e:
+            logger.error(f"Error booking appointment via tag: {e}")
+
+    # 8. Parse [MEDIA:ID] tags and send media files
     media_tags = re.findall(r'\[MEDIA:(\d+)\]', ai_reply)
     clean_reply = re.sub(r'\s*\[MEDIA:\d+\]\s*', ' ', ai_reply).strip()
 
@@ -136,10 +158,11 @@ async def _process_message_inner(
             if mid in media_map:
                 m = media_map[mid]
                 try:
+                    target_id = reply_to if reply_to else phone
                     if wa_mode == "cloud_api":
                         from routers.whatsapp import send_cloud_api_media
                         await send_cloud_api_media(
-                            phone=phone,
+                            phone=target_id,
                             media_url=f"{BACKEND_URL}/api/media/file/{m.id}",
                             filename=m.original_filename,
                             caption=m.name,
@@ -150,13 +173,14 @@ async def _process_message_inner(
                             await client.post(
                                 f"{BRIDGE_URL}/send-media",
                                 json={
-                                    "phone": phone,
+                                    "phone": target_id,
                                     "mediaUrl": f"{BACKEND_URL}/api/media/file/{m.id}",
                                     "filename": m.original_filename,
                                     "caption": m.name,
+                                    "business_id": business_id,
                                 },
                             )
-                    logger.info(f"[Engine] Sent media '{m.name}' to {phone} via {wa_mode}")
+                    logger.info(f"[Engine] Sent media '{m.name}' to {target_id} via {wa_mode}")
                 except httpx.TimeoutException:
                     logger.error(f"[Engine] Media send timed out for '{m.name}' to {phone}")
                 except Exception as e:
@@ -246,13 +270,15 @@ async def _process_message_inner(
     wa_mode = getattr(ai_settings, 'wa_connection_mode', 'qr') or 'qr'
     delay = getattr(ai_settings, 'reply_delay', 0) or 0
     show_typing = getattr(ai_settings, 'typing_indicator', 0) or 0
+    target_id = reply_to if reply_to else phone
+
     if delay > 0:
         # Typing indicator only works in QR mode (Cloud API doesn't support it)
         if show_typing and wa_mode == "qr":
             try:
                 async with httpx.AsyncClient(timeout=5) as client:
-                    await client.post(f"{BRIDGE_URL}/typing", json={"phone": phone})
-                logger.info(f"[Engine] Typing indicator sent to {phone}")
+                    await client.post(f"{BRIDGE_URL}/typing", json={"phone": target_id, "business_id": business_id})
+                logger.info(f"[Engine] Typing indicator sent to {target_id}")
             except Exception as e:
                 logger.warning(f"[Engine] Failed to send typing: {type(e).__name__}: {e}")
         logger.info(f"[Engine] Waiting {delay}s before replying...")
@@ -272,11 +298,11 @@ async def _process_message_inner(
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
                         f"{BRIDGE_URL}/send",
-                        json={"phone": phone, "message": clean_reply},
+                        json={"phone": target_id, "message": clean_reply, "business_id": business_id},
                     )
-                logger.info(f"[Engine] Replied to {phone} via QR bridge: {clean_reply[:50]}...")
+                logger.info(f"[Engine] Replied to {target_id} via QR bridge: {clean_reply[:50]}...")
         except httpx.TimeoutException:
-            logger.error(f"[Engine] Reply send timed out for {phone}")
+            logger.error(f"[Engine] Reply send timed out for {target_id}")
         except Exception as e:
             logger.error(f"[Engine] Failed to send reply: {type(e).__name__}: {e}")
 
@@ -381,9 +407,11 @@ async def _build_appointment_context(db: AsyncSession, business_id: int, lead_id
 
 def _clean_ai_reply(raw: str) -> str:
     """Strip internal reasoning / monologue that some models leak."""
-    text = raw.strip()
+    if not raw:
+        return ""
+    text = str(raw).strip()
     if not text:
-        return text
+        return ""
 
     # 1. Remove <think>...</think> blocks (DeepSeek, etc.)
     text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
@@ -413,13 +441,17 @@ def _clean_ai_reply(raw: str) -> str:
     # 3. Detect reasoning even without parentheses (some models dump raw thoughts)
     reasoning_markers = ['let me ', 'i need to ', 'i should ', 'i must ', 'checking ',
                          'looking at ', 'analyzing ', 'the user ', 'my response ',
-                         'word count', 'draft:', 'alternative:', 'best approach:']
+                         'word count', 'draft:', 'alternative:', 'best approach:',
+                         "here's a thinking process", "thinking process:", "here is a thinking process",
+                         "we need ", "need to ", "the customer ", "they provided ", "we should ",
+                         "as per instruction", "first step", "infer "]
     lines = text.split('\n')
-    if len(lines) > 5:
-        first_3 = '\n'.join(lines[:3]).lower()
-        if any(marker in first_3 for marker in reasoning_markers):
+    if len(lines) > 3 or any(marker in text[:300].lower() for marker in reasoning_markers):
+        if any(marker in text[:400].lower() for marker in reasoning_markers):
             # Looks like reasoning dump — try to extract actual reply
-            text = _extract_reply_from_reasoning(text)
+            extracted = _extract_reply_from_reasoning(text)
+            if extracted:
+                text = extracted
 
     # 4. Remove **action asterisks** like *thinks* or *checks database*
     text = re.sub(r'\*[^*]{3,80}\*\s*', '', text).strip()
@@ -470,6 +502,9 @@ def _extract_reply_from_reasoning(inner: str) -> str:
 
 async def generate_ai_reply(ai_settings, business, history, current_message, media_files=None, appt_context="") -> str:
     """Generate an AI reply using the configured provider."""
+    if not current_message or not current_message.strip():
+        return ""
+
     if not ai_settings or not ai_settings.api_key:
         logger.warning("[Engine] No AI settings or API key configured — using fallback")
         return "Thank you for your message! We'll get back to you shortly."
@@ -513,6 +548,18 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
         role = "assistant" if msg.sender_type == "ai" else "user"
         messages.append({"role": role, "content": msg.message_text})
 
+    # Ensure current_message is present at the end of messages for the model to reply to
+    if current_message and (not messages or messages[-1]["role"] != "user" or messages[-1]["content"] != current_message):
+        messages.append({"role": "user", "content": current_message})
+
+    temp = float(ai_settings.temperature if ai_settings.temperature is not None else 0.7)
+    if temp > 1.2 or temp < 0.1:
+        temp = 0.7
+
+    max_toks = int(ai_settings.max_tokens or 500)
+    if max_toks > 1000 or max_toks < 50:
+        max_toks = 500
+
     provider = ai_settings.provider.lower()
 
     # Default model fallbacks if model is empty
@@ -521,26 +568,44 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
         model_defaults = {
             "openai": "gpt-4o-mini",
             "gemini": "gemini-1.5-flash",
-            "openrouter": "openai/gpt-4o-mini",
+            "openrouter": "openrouter/free",
         }
         model = model_defaults.get(provider, "gpt-4o-mini")
         logger.warning(f"[Engine] Model was empty — using default: {model}")
 
-    logger.info(f"[Engine] Generating reply via {provider} / {model} (history: {len(history)} msgs)")
+    logger.info(f"[Engine] Generating reply via {provider} / {model} (history: {len(history)} msgs, temp={temp}, max_tokens={max_toks})")
 
     try:
         if provider in ("openai", "openrouter"):
             from openai import AsyncOpenAI
             base_url = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
             client = AsyncOpenAI(api_key=ai_settings.api_key, base_url=base_url)
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=ai_settings.temperature,
-                max_tokens=ai_settings.max_tokens,
-            )
-            reply = response.choices[0].message.content.strip()
-            reply = _clean_ai_reply(reply)
+
+            try:
+                response = await client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_toks,
+                )
+            except Exception as call_err:
+                err_str = str(call_err).lower()
+                # If OpenRouter reports out of credits (402) or model not found (404), auto-fallback to openrouter/free!
+                if provider == "openrouter" and ('402' in err_str or 'credits' in err_str or '404' in err_str):
+                    logger.warning(f"[Engine] OpenRouter credit issue ({call_err}) for model '{model}' — auto-falling back to 'openrouter/free'!")
+                    response = await client.chat.completions.create(
+                        model="openrouter/free",
+                        messages=messages,
+                        temperature=temp,
+                        max_tokens=max_toks,
+                    )
+                else:
+                    raise call_err
+
+            raw_reply = response.choices[0].message.content
+            if not raw_reply:
+                raw_reply = getattr(response.choices[0].message, 'reasoning', '') or ''
+            reply = _clean_ai_reply(raw_reply)
             logger.info(f"[Engine] AI reply generated ({len(reply)} chars)")
             return reply
 
@@ -552,11 +617,11 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
                 model=model,
                 system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 messages=anthropic_messages,
-                temperature=ai_settings.temperature,
-                max_tokens=ai_settings.max_tokens,
+                temperature=temp,
+                max_tokens=max_toks,
             )
-            reply = response.content[0].text.strip()
-            reply = _clean_ai_reply(reply)
+            raw_reply = response.content[0].text if response.content else ""
+            reply = _clean_ai_reply(raw_reply)
             logger.info(f"[Engine] AI reply generated ({len(reply)} chars)")
             return reply
 
@@ -566,17 +631,32 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
             gmodel = genai.GenerativeModel(
                 model,
                 system_instruction=system_prompt,
+                generation_config={
+                    "temperature": temp,
+                    "max_output_tokens": max_toks,
+                }
             )
-            chat_history = []
-            for msg in history:
+            # Gemini requires history to start with 'user' and alternate 'user' -> 'model'
+            # Also history must NOT include the current message (which is passed to send_message)
+            gemini_history = []
+            hist_messages = history[:-1] if (history and history[-1].message_text == current_message) else history
+
+            for msg in hist_messages:
                 role = "model" if msg.sender_type == "ai" else "user"
-                chat_history.append({"role": role, "parts": [msg.message_text]})
+                # If consecutive messages have the same role, combine them
+                if gemini_history and gemini_history[-1]["role"] == role:
+                    gemini_history[-1]["parts"][0] += f"\n{msg.message_text}"
+                else:
+                    gemini_history.append({"role": role, "parts": [msg.message_text]})
+
+            # Gemini history must start with 'user'
+            while gemini_history and gemini_history[0]["role"] != "user":
+                gemini_history.pop(0)
 
             # Gemini's generate_content is synchronous — run in thread to avoid blocking event loop
-            chat = gmodel.start_chat(history=chat_history)
+            chat = gmodel.start_chat(history=gemini_history)
             response = await asyncio.to_thread(chat.send_message, current_message)
-            reply = response.text.strip()
-            reply = _clean_ai_reply(reply)
+            reply = _clean_ai_reply(response.text)
             logger.info(f"[Engine] AI reply generated ({len(reply)} chars)")
             return reply
 

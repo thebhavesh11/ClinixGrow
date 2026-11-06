@@ -15,6 +15,9 @@ class BusinessBase(BaseModel):
     location: str = ""
     offers: str = ""
     working_hours: str = ""
+    portal_token: Optional[str] = None
+    portal_pin: Optional[str] = None
+    logo_url: Optional[str] = ""
 
 
 class BusinessCreate(BusinessBase):
@@ -48,6 +51,14 @@ class AISettingBase(BaseModel):
     reply_to_contacts: int = 1
     auto_handover: int = 0
     handover_after: int = 10
+    
+    reminder_enabled: int = 0
+    reminder_time_mins: int = 30
+    reminder_message_template: str = "Hi {name}, this is a reminder for your appointment at ClinixGrow at {time}."
+    feedback_enabled: int = 0
+    feedback_time_mins: int = 120
+    feedback_message_template: str = "Hi {name}, thank you for your visit to ClinixGrow! Please share your feedback: [Link]"
+
     wa_connection_mode: str = "qr"
     wa_app_id: str = ""
     wa_app_secret: str = ""
@@ -120,6 +131,10 @@ class ConversationResponse(BaseModel):
     business_id: int
     created_at: datetime
     lead: Optional[LeadResponse] = None
+    last_message: Optional[str] = None
+    last_message_time: Optional[datetime] = None
+    last_sender_type: Optional[str] = None
+    unread_count: Optional[int] = 0
 
     class Config:
         from_attributes = True
@@ -180,6 +195,8 @@ class WhatsAppWebhook(BaseModel):
     name: Optional[str] = "Unknown"
     business_id: int = 1
     is_group: bool = False
+    reply_to: Optional[str] = None
+    should_reply: bool = True
 
 
 # ── Working Hours ─────────────────────────────────────────
@@ -259,6 +276,7 @@ class AppointmentResponse(BaseModel):
     notes: str
     booked_by: str
     reminder_sent: int
+    feedback_sent: int
     created_at: datetime
     lead: Optional[LeadResponse] = None
 

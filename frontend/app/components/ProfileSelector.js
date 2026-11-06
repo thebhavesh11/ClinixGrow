@@ -32,7 +32,26 @@ export default function ProfileSelector() {
   const [form, setForm] = useState({ name: '', industry: '', services: '', location: '' });
   const [creating, setCreating] = useState(false);
   const [hoveredId, setHoveredId] = useState(null);
+  const [manageMode, setManageMode] = useState(false);
+  const [deletingId, setDeletingId] = useState(null);
   const [toast, setToast] = useState(null);
+
+  async function deleteClient(id, name, e) {
+    if (e) e.stopPropagation();
+    if (!confirm(`Are you sure you want to delete "${name}"?\n\nThis will permanently delete ALL data for this client:\n- Leads & Contacts\n- Conversations & Messages\n- Appointments\n- AI System Prompts & Settings\n- WhatsApp Session & Chats\n\nThis cannot be undone!`)) return;
+
+    setDeletingId(id);
+    const [, err] = await safeFetch(`${API}/clients/${id}`, { method: 'DELETE' });
+    setDeletingId(null);
+    if (err) {
+      setToast({ msg: err, type: 'error' });
+      setTimeout(() => setToast(null), 3000);
+      return;
+    }
+    setToast({ msg: `Client "${name}" deleted successfully!`, type: 'success' });
+    setTimeout(() => setToast(null), 3000);
+    await loadClients();
+  }
 
   async function createClient() {
     if (!form.name.trim()) { setToast({ msg: 'Client name is required', type: 'error' }); setTimeout(() => setToast(null), 3000); return; }
@@ -89,8 +108,12 @@ export default function ProfileSelector() {
         </div>
 
         {/* Title */}
-        <h1 className="profile-title">Who's automating?</h1>
-        <p className="profile-subtitle">Select a client profile to manage their automation</p>
+        <h1 className="profile-title">{manageMode ? 'Manage Client Profiles' : "Who's automating?"}</h1>
+        <p className="profile-subtitle">
+          {manageMode
+            ? 'Click any client profile below to delete them and their data'
+            : 'Select a client profile to manage their automation'}
+        </p>
 
         {/* Profile Grid */}
         <div className="profile-grid">
@@ -100,10 +123,14 @@ export default function ProfileSelector() {
             return (
               <div
                 key={client.id}
-                className={`profile-card ${isHovered ? 'hovered' : ''}`}
-                onClick={() => enterClient(client.id)}
+                className={`profile-card ${isHovered ? 'hovered' : ''} ${manageMode ? 'managing' : ''}`}
+                onClick={() => manageMode ? deleteClient(client.id, client.name) : enterClient(client.id)}
                 onMouseEnter={() => setHoveredId(client.id)}
                 onMouseLeave={() => setHoveredId(null)}
+                style={{
+                  position: 'relative',
+                  border: manageMode ? '1px dashed rgba(239,68,68,0.5)' : undefined,
+                }}
               >
                 <div className="profile-avatar" style={{ background: avatar.bg }}>
                   <span className="profile-avatar-initials">{getInitials(client.name)}</span>
@@ -113,26 +140,74 @@ export default function ProfileSelector() {
                 {client.industry && (
                   <div className="profile-card-industry">{client.industry}</div>
                 )}
-                <div className="profile-card-stats-mini">
-                  <span>📊 {client.leads_count || 0}</span>
-                  <span>💬 {client.conversations_count || 0}</span>
-                  <span>📅 {client.appointments_count || 0}</span>
-                </div>
+                {!manageMode ? (
+                  <div className="profile-card-stats-mini">
+                    <span>📊 {client.leads_count || 0}</span>
+                    <span>💬 {client.conversations_count || 0}</span>
+                    <span>📅 {client.appointments_count || 0}</span>
+                  </div>
+                ) : (
+                  <button
+                    onClick={(e) => deleteClient(client.id, client.name, e)}
+                    disabled={deletingId === client.id}
+                    style={{
+                      marginTop: 8,
+                      padding: '5px 12px',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      background: 'rgba(239,68,68,0.2)',
+                      color: '#ef4444',
+                      border: '1px solid rgba(239,68,68,0.5)',
+                      borderRadius: 6,
+                      cursor: 'pointer',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 4,
+                    }}
+                  >
+                    {deletingId === client.id ? 'Deleting...' : '🗑 Delete Client'}
+                  </button>
+                )}
               </div>
             );
           })}
 
-          {/* Add New Client Card */}
-          <div
-            className={`profile-card profile-card-add ${showCreate ? 'creating' : ''}`}
-            onClick={() => !showCreate && setShowCreate(true)}
-          >
-            <div className="profile-avatar profile-avatar-add">
-              <span className="profile-add-icon">+</span>
+          {/* Add New Client Card (hide when managing) */}
+          {!manageMode && (
+            <div
+              className={`profile-card profile-card-add ${showCreate ? 'creating' : ''}`}
+              onClick={() => !showCreate && setShowCreate(true)}
+            >
+              <div className="profile-avatar profile-avatar-add">
+                <span className="profile-add-icon">+</span>
+              </div>
+              <div className="profile-card-name">Add Client</div>
             </div>
-            <div className="profile-card-name">Add Client</div>
-          </div>
+          )}
         </div>
+
+        {/* Manage Profiles Toggle Button */}
+        {clients.length > 0 && (
+          <div style={{ marginTop: 32, display: 'flex', justifyContent: 'center' }}>
+            <button
+              onClick={() => setManageMode(!manageMode)}
+              style={{
+                background: manageMode ? 'rgba(239,68,68,0.15)' : 'rgba(255,255,255,0.08)',
+                color: manageMode ? '#ef4444' : 'var(--text-secondary)',
+                border: manageMode ? '1px solid rgba(239,68,68,0.4)' : '1px solid rgba(255,255,255,0.15)',
+                padding: '8px 24px',
+                borderRadius: 8,
+                fontSize: 13,
+                fontWeight: 600,
+                cursor: 'pointer',
+                letterSpacing: 0.5,
+                transition: 'all 0.2s',
+              }}
+            >
+              {manageMode ? '✓ Done Managing' : '⚙️ Manage Profiles'}
+            </button>
+          </div>
+        )}
 
         {/* Empty state for first-time users */}
         {clients.length === 0 && (

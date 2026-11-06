@@ -18,7 +18,7 @@ const NAV_ITEMS = [
   { section: '' },
   { href: '/clients', icon: '👥', label: 'Manage Clients' },
   { href: '/businesses', icon: '🏢', label: 'Business Profile' },
-  { href: '/whatsapp', icon: '📱', label: 'WhatsApp' },
+  { href: '/whatsapp', icon: '📱', label: 'WhatsApp Web' },
   { href: '/automation', icon: '⚡', label: 'Automation' },
 ];
 
@@ -33,7 +33,7 @@ function AppShell({ children }) {
     async function check() {
       if (!selectedClientId || profileMode) return;
       try {
-        const [waData] = await safeFetch(`${API}/whatsapp/status`);
+        const [waData] = await safeFetch(`${API}/whatsapp/status?business_id=${selectedClientId}`);
         const [dashData] = await safeFetch(`${API}/dashboard?business_id=${selectedClientId}`);
         setHealth({ whatsapp: waData?.connected || false, api: true });
         if (dashData) setCounts({ conversations: dashData.active_conversations || 0, leads: dashData.total_leads || 0, appointments: dashData.appointments_today || 0 });
@@ -43,6 +43,16 @@ function AppShell({ children }) {
     const iv = setInterval(check, 15000);
     return () => clearInterval(iv);
   }, [selectedClientId, profileMode]);
+
+  // Client portal routes are completely standalone (no admin sidebar, no switcher)
+  const isPortalRoute = pathname && pathname.startsWith('/portal');
+  if (isPortalRoute) {
+    return (
+      <main style={{ minHeight: '100vh', height: '100vh', overflowY: 'auto', WebkitOverflowScrolling: 'touch', background: '#090d16' }}>
+        {children}
+      </main>
+    );
+  }
 
   // Show Netflix-style profile selector
   if (profileMode) {
@@ -144,7 +154,11 @@ function AppShell({ children }) {
 export default function RootLayout({ children }) {
   return (
     <html lang="en">
-      <head><title>FlowBot AI — WhatsApp Automation</title><meta name="description" content="AI-Powered WhatsApp Automation Platform" /></head>
+      <head>
+        <title>FlowBot AI — WhatsApp Automation</title>
+        <meta name="description" content="AI-Powered WhatsApp Automation Platform" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+      </head>
       <body>
         <ClientProvider>
           <AppShell>{children}</AppShell>

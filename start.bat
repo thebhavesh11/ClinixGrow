@@ -8,9 +8,16 @@ echo.
 
 :: Kill any existing processes on ports 8000, 3000, 3001
 echo [1/4] Cleaning up old processes...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do taskkill /f /pid %%a >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do taskkill /f /pid %%a >nul 2>&1
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3001 " ^| findstr "LISTENING"') do taskkill /f /pid %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do taskkill /f /t /pid %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do taskkill /f /t /pid %%a >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3001 " ^| findstr "LISTENING"') do taskkill /f /t /pid %%a >nul 2>&1
+
+:: Kill any orphaned Puppeteer Chrome processes
+powershell -NoProfile -Command "Get-Process -Name chrome -ErrorAction SilentlyContinue | Where-Object { $_.Path -like '*puppeteer*' -or $_.Path -like '*chrome-win64*' } | Stop-Process -Force -ErrorAction SilentlyContinue" >nul 2>&1
+
+:: Clean stale lockfile if it exists
+if exist "%~dp0whatsapp-bridge\.wwebjs_auth\session\lockfile" del /f /q "%~dp0whatsapp-bridge\.wwebjs_auth\session\lockfile" >nul 2>&1
+for /d %%d in ("%~dp0whatsapp-bridge\.wwebjs_auth\session*") do if exist "%%d\lockfile" del /f /q "%%d\lockfile" >nul 2>&1
 timeout /t 2 >nul
 
 :: Start Backend (FastAPI)

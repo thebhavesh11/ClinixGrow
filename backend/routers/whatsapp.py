@@ -32,9 +32,9 @@ async def _get_wa_settings(db: AsyncSession, business_id: int = 1):
 # ══════════════════════════════════════════════════════════════════════
 
 @router.get("/status")
-async def whatsapp_status(db: AsyncSession = Depends(get_db)):
-    """Get WhatsApp connection status — adapts to current mode."""
-    settings = await _get_wa_settings(db)
+async def whatsapp_status(business_id: int = Query(1), db: AsyncSession = Depends(get_db)):
+    """Get WhatsApp connection status — adapts to current mode and scoped to business_id."""
+    settings = await _get_wa_settings(db, business_id)
     mode = getattr(settings, "wa_connection_mode", "qr") or "qr"
 
     if mode == "cloud_api":
@@ -57,6 +57,7 @@ async def whatsapp_status(db: AsyncSession = Depends(get_db)):
                             "connected": True,
                             "hasQR": False,
                             "mode": "cloud_api",
+                            "business_id": business_id,
                             "info": {
                                 "pushname": data.get("verified_name", "WhatsApp Business"),
                                 "platform": "Cloud API",
@@ -69,6 +70,7 @@ async def whatsapp_status(db: AsyncSession = Depends(get_db)):
                             "connected": False,
                             "hasQR": False,
                             "mode": "cloud_api",
+                            "business_id": business_id,
                             "info": None,
                             "error": f"Invalid credentials (HTTP {r.status_code})",
                         }
@@ -78,6 +80,7 @@ async def whatsapp_status(db: AsyncSession = Depends(get_db)):
                     "connected": False,
                     "hasQR": False,
                     "mode": "cloud_api",
+                    "business_id": business_id,
                     "info": None,
                     "error": f"Connection check failed: {type(e).__name__}",
                 }
@@ -86,44 +89,46 @@ async def whatsapp_status(db: AsyncSession = Depends(get_db)):
                 "connected": False,
                 "hasQR": False,
                 "mode": "cloud_api",
+                "business_id": business_id,
                 "info": None,
                 "error": "Cloud API credentials not configured",
             }
     else:
-        # QR mode — proxy to bridge
+        # QR mode — proxy to bridge with business_id
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.get(f"{BRIDGE_URL}/status")
+                r = await client.get(f"{BRIDGE_URL}/status?business_id={business_id}")
                 data = r.json()
                 data["mode"] = "qr"
+                data["business_id"] = business_id
                 return data
         except httpx.TimeoutException:
-            logger.warning("[WhatsApp] Bridge status check timed out")
-            return {"connected": False, "info": None, "hasQR": False, "mode": "qr", "error": "Bridge timeout"}
+            logger.warning(f"[WhatsApp] Bridge status check timed out for biz {business_id}")
+            return {"connected": False, "info": None, "hasQR": False, "mode": "qr", "business_id": business_id, "error": "Bridge timeout"}
         except Exception as e:
             logger.warning(f"[WhatsApp] Bridge unreachable: {type(e).__name__}")
-            return {"connected": False, "info": None, "hasQR": False, "mode": "qr", "error": "Bridge unreachable"}
+            return {"connected": False, "info": None, "hasQR": False, "mode": "qr", "business_id": business_id, "error": "Bridge unreachable"}
 
 
 @router.get("/qr")
-async def whatsapp_qr():
-    """Get QR code from bridge."""
+async def whatsapp_qr(business_id: int = Query(1)):
+    """Get QR code from bridge scoped to business_id."""
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{BRIDGE_URL}/qr")
+            r = await client.get(f"{BRIDGE_URL}/qr?business_id={business_id}")
             return r.json()
     except httpx.TimeoutException:
-        logger.warning("[WhatsApp] QR fetch timed out")
-        return {"qr": None, "error": "Bridge timeout"}
+        logger.warning(f"[WhatsApp] QR fetch timed out for biz {business_id}")
+        return {"qr": None, "business_id": business_id, "error": "Bridge timeout"}
     except Exception as e:
         logger.warning(f"[WhatsApp] QR fetch failed: {type(e).__name__}")
-        return {"qr": None, "error": "Bridge unreachable"}
+        return {"qr": None, "business_id": business_id, "error": "Bridge unreachable"}
 
 
 @router.post("/send")
-async def send_message(phone: str, message: str, db: AsyncSession = Depends(get_db)):
+async def send_message(phone: str, message: str, business_id: int = Query(1), db: AsyncSession = Depends(get_db)):
     """Send a message — routes to QR bridge or Cloud API based on mode."""
-    settings = await _get_wa_settings(db)
+    settings = await _get_wa_settings(db, business_id)
     mode = getattr(settings, "wa_connection_mode", "qr") or "qr"
 
     if mode == "cloud_api":
@@ -131,10 +136,13 @@ async def send_message(phone: str, message: str, db: AsyncSession = Depends(get_
     else:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(f"{BRIDGE_URL}/send", json={"phone": phone, "message": message})
+                r = await client.post(
+                    f"{BRIDGE_URL}/send",
+                    json={"phone": phone, "message": message, "business_id": business_id},
+                )
                 return r.json()
         except httpx.TimeoutException:
-            logger.error(f"[WhatsApp] Send message timed out for {phone}")
+            logger.error(f"[WhatsApp] Send message timed out for {phone} (biz {business_id})")
             return {"success": False, "error": "Bridge timeout"}
         except Exception as e:
             logger.error(f"[WhatsApp] Send message failed: {type(e).__name__}: {e}")
@@ -142,14 +150,14 @@ async def send_message(phone: str, message: str, db: AsyncSession = Depends(get_
 
 
 @router.post("/disconnect")
-async def whatsapp_disconnect():
-    """Disconnect/logout WhatsApp session (QR mode only)."""
+async def whatsapp_disconnect(business_id: int = Query(1)):
+    """Disconnect/logout WhatsApp session for a specific business (QR mode only)."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{BRIDGE_URL}/logout")
+            r = await client.post(f"{BRIDGE_URL}/logout?business_id={business_id}", json={"business_id": business_id})
             return r.json()
     except httpx.TimeoutException:
-        logger.error("[WhatsApp] Disconnect timed out")
+        logger.error(f"[WhatsApp] Disconnect timed out for biz {business_id}")
         return {"success": False, "error": "Bridge timeout"}
     except Exception as e:
         logger.error(f"[WhatsApp] Disconnect failed: {type(e).__name__}: {e}")
@@ -157,32 +165,85 @@ async def whatsapp_disconnect():
 
 
 @router.post("/restart")
-async def whatsapp_restart():
-    """Restart WhatsApp client (QR mode only)."""
+async def whatsapp_restart(business_id: int = Query(1)):
+    """Restart WhatsApp client for a specific business (QR mode only)."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(f"{BRIDGE_URL}/restart")
+            r = await client.post(f"{BRIDGE_URL}/restart?business_id={business_id}", json={"business_id": business_id})
             return r.json()
     except httpx.TimeoutException:
-        logger.error("[WhatsApp] Restart timed out")
+        logger.error(f"[WhatsApp] Restart timed out for biz {business_id}")
         return {"success": False, "error": "Bridge timeout"}
     except Exception as e:
         logger.error(f"[WhatsApp] Restart failed: {type(e).__name__}: {e}")
         return {"success": False, "error": str(e)}
 
 
+@router.get("/chats")
+async def whatsapp_chats(business_id: int = Query(1)):
+    """Get recent WhatsApp chats from bridge for a specific business."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{BRIDGE_URL}/chats?business_id={business_id}")
+            return r.json()
+    except Exception as e:
+        logger.warning(f"[WhatsApp] Failed to fetch chats from bridge for biz {business_id}: {e}")
+        return {"success": False, "connected": False, "chats": [], "error": str(e)}
+
+
+@router.get("/chats/{chat_id}/messages")
+async def whatsapp_chat_messages(chat_id: str, limit: int = 40, business_id: int = Query(1)):
+    """Get message history for a specific chat from bridge for a specific business."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{BRIDGE_URL}/chats/{chat_id}/messages?limit={limit}&business_id={business_id}")
+            return r.json()
+    except Exception as e:
+        logger.warning(f"[WhatsApp] Failed to fetch chat messages for {chat_id} (biz {business_id}): {e}")
+        return {"success": False, "messages": [], "error": str(e)}
+
+
+# Active business tracking for single-session WhatsApp bridge
+_active_business_id: int = 1
+
+def get_active_business_id() -> int:
+    return _active_business_id
+
+def set_active_business_id(biz_id: int):
+    global _active_business_id
+    _active_business_id = biz_id
+
+
+@router.get("/active-business")
+async def get_active_business():
+    """Get the currently active business ID for WhatsApp automation."""
+    return {"business_id": _active_business_id}
+
+
+@router.post("/active-business")
+async def set_active_business(data: dict):
+    """Set the active business ID for WhatsApp automation."""
+    biz_id = int(data.get("business_id", 1))
+    set_active_business_id(biz_id)
+    logger.info(f"[WhatsApp] Active business set to {biz_id}")
+    return {"business_id": _active_business_id}
+
+
 @router.post("/webhook")
 async def webhook(data: WhatsAppWebhook, db: AsyncSession = Depends(get_db)):
     """Receive incoming WhatsApp messages from bridge (QR mode)."""
-    logger.info(f"[Webhook] Received message from {data.phone}: {data.message[:50]}...")
+    target_biz_id = data.business_id if (data.business_id and data.business_id > 0) else _active_business_id
+    logger.info(f"[Webhook] Received message from {data.phone} (biz={target_biz_id}, should_reply={data.should_reply}): {data.message[:50]}...")
     try:
         from automation.engine import process_incoming_message
         result = await process_incoming_message(
             phone=data.phone,
             message=data.message,
             name=data.name or "Unknown",
-            business_id=data.business_id,
+            business_id=target_biz_id,
             db=db,
+            reply_to=data.reply_to,
+            should_reply=data.should_reply,
         )
         return {"status": "processed", "result": result}
     except Exception as e:
@@ -320,9 +381,9 @@ async def cloud_webhook_receive(request: Request, db: AsyncSession = Depends(get
 
 
 @router.post("/cloud/subscribe")
-async def cloud_subscribe_webhook(webhook_url: str, db: AsyncSession = Depends(get_db)):
+async def cloud_subscribe_webhook(webhook_url: str, business_id: int = Query(1), db: AsyncSession = Depends(get_db)):
     """Subscribe the webhook with Meta — registers the callback URL programmatically."""
-    settings = await _get_wa_settings(db)
+    settings = await _get_wa_settings(db, business_id)
     if not settings:
         return {"success": False, "error": "No settings configured"}
 
@@ -362,9 +423,9 @@ async def cloud_subscribe_webhook(webhook_url: str, db: AsyncSession = Depends(g
 
 
 @router.get("/cloud/webhook-status")
-async def cloud_webhook_status(db: AsyncSession = Depends(get_db)):
+async def cloud_webhook_status(business_id: int = Query(1), db: AsyncSession = Depends(get_db)):
     """Check current webhook subscription status."""
-    settings = await _get_wa_settings(db)
+    settings = await _get_wa_settings(db, business_id)
     if not settings:
         return {"subscribed": False, "error": "No settings configured"}
 
@@ -407,9 +468,9 @@ async def cloud_webhook_status(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/cloud/test")
-async def cloud_test_connection(db: AsyncSession = Depends(get_db)):
+async def cloud_test_connection(business_id: int = Query(1), db: AsyncSession = Depends(get_db)):
     """Test Cloud API connection — validates each credential step-by-step like n8n."""
-    settings = await _get_wa_settings(db)
+    settings = await _get_wa_settings(db, business_id)
     if not settings:
         return {"success": False, "error": "No settings configured", "error_details": None}
 

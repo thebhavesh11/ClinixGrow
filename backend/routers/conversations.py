@@ -30,14 +30,47 @@ class LeadStatusUpdate(BaseModel):
 
 @router.get("", response_model=List[ConversationResponse])
 async def list_conversations(business_id: int = 1, db: AsyncSession = Depends(get_db)):
-    """List all conversations for a business with lead info, ordered by most recent."""
+    """List all conversations for a business with lead info, ordered by latest message timestamp."""
     result = await db.execute(
         select(Conversation)
-        .options(selectinload(Conversation.lead))
+        .options(selectinload(Conversation.lead), selectinload(Conversation.messages))
         .where(Conversation.business_id == business_id)
-        .order_by(Conversation.created_at.desc())
     )
-    return result.scalars().all()
+    conversations = result.scalars().all()
+
+    resp_list = []
+    for conv in conversations:
+        # Get latest message
+        last_msg = conv.messages[-1] if conv.messages else None
+        last_text = last_msg.message_text if last_msg else None
+        last_time = last_msg.created_at if last_msg else conv.created_at
+        last_sender = last_msg.sender_type if last_msg else None
+
+        # Unread customer messages
+        unread = 0
+        if conv.messages:
+            for m in reversed(conv.messages):
+                if m.sender_type == 'customer':
+                    unread += 1
+                else:
+                    break
+
+        item = ConversationResponse(
+            id=conv.id,
+            lead_id=conv.lead_id,
+            business_id=conv.business_id,
+            created_at=conv.created_at,
+            lead=conv.lead,
+            last_message=last_text,
+            last_message_time=last_time,
+            last_sender_type=last_sender,
+            unread_count=unread,
+        )
+        resp_list.append((last_time or conv.created_at, item))
+
+    # Sort descending by latest message time
+    resp_list.sort(key=lambda x: x[0], reverse=True)
+    return [x[1] for x in resp_list]
 
 
 @router.get("/{conversation_id}/messages", response_model=List[MessageResponse])
@@ -96,7 +129,10 @@ async def manual_reply(conversation_id: int, data: ManualReplyRequest, db: Async
                 send_error = result.get("error", "Unknown error")
         else:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(f"{BRIDGE_URL}/send", json={"phone": phone, "message": data.message.strip()})
+                r = await client.post(
+                    f"{BRIDGE_URL}/send",
+                    json={"phone": phone, "message": data.message.strip(), "business_id": conv.business_id},
+                )
                 resp = r.json()
                 send_success = resp.get("success", True)
                 if not send_success:

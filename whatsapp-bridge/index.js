@@ -1,14 +1,16 @@
 /**
- * WhatsApp Web Bridge — connects WhatsApp Web to the FastAPI backend
- * Uses whatsapp-web.js with Puppeteer for automation
+ * WhatsApp Web Bridge — Multi-tenant multi-session bridge connecting WhatsApp Web to FastAPI backend
+ * Supports isolated sessions per business/client using whatsapp-web.js LocalAuth with clientId
  */
 
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode');
 const axios = require('axios');
 const puppeteer = require('puppeteer');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
@@ -16,50 +18,132 @@ app.use(express.json());
 
 const PORT = 3001;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8000';
+const BRIDGE_BOOT_TIME = Math.floor(Date.now() / 1000);
 
-let client = null;
-let latestQR = null;
-let isConnected = false;
-let connectionInfo = null;
-let initError = null;
-let readyTimestamp = null; // Track when client became ready — ignore messages before this
+// ── Multi-Session Store ─────────────────────────────────────────────
+// Map: businessId (number) -> SessionState
+const sessions = new Map();
 
-// ── AI Settings Cache (avoids hitting backend on every message) ──────
-let _cachedSettings = null;
-let _cachedSettingsTime = 0;
-const SETTINGS_CACHE_TTL = 30000; // 30 seconds
-
-async function getCachedSettings() {
-    const now = Date.now();
-    if (_cachedSettings && (now - _cachedSettingsTime) < SETTINGS_CACHE_TTL) {
-        return _cachedSettings;
+function getSession(businessId) {
+    const id = parseInt(businessId) || 1;
+    if (!sessions.has(id)) {
+        sessions.set(id, {
+            businessId: id,
+            client: null,
+            latestQR: null,
+            isConnected: false,
+            connectionState: 'disconnected', // 'starting' | 'qr_ready' | 'authenticating' | 'syncing' | 'connected' | 'auth_failure' | 'disconnected'
+            connectionInfo: null,
+            initError: null,
+            loadingProgress: { percent: 0, message: '' },
+            readyTimestamp: null,
+            initializing: false,
+        });
     }
-    try {
-        const res = await axios.get(`${BACKEND_URL}/api/ai-settings`, { timeout: 5000 });
-        _cachedSettings = res.data;
-        _cachedSettingsTime = now;
-        return _cachedSettings;
-    } catch (err) {
-        console.error('[Bridge] Failed to fetch AI settings:', err.message);
-        return _cachedSettings; // return stale cache if available
+    return sessions.get(id);
+}
+
+// ── Lockfile & Session Directory Cleanup ────────────────────────────
+function cleanStaleLockfiles(businessId) {
+    const id = parseInt(businessId) || 1;
+    const authDir = path.join(__dirname, '.wwebjs_auth', `session-client_${id}`);
+    const lockfiles = ['lockfile', 'SingletonLock', 'SingletonCookie', 'SingletonSocket', 'DevToolsActivePort'];
+    for (const file of lockfiles) {
+        try {
+            const p = path.join(authDir, file);
+            if (fs.existsSync(p)) {
+                fs.unlinkSync(p);
+                console.log(`[Bridge-Biz-${id}] Removed stale lockfile: ${file}`);
+            }
+        } catch (e) {
+            console.warn(`[Bridge-Biz-${id}] Could not remove ${file}:`, e.message);
+        }
     }
 }
 
-// ── Global Error Handlers (prevent process crash) ────────────────────
-process.on('unhandledRejection', (reason, promise) => {
+async function cleanAuthSessionAsync(businessId) {
+    const id = parseInt(businessId) || 1;
+    const authDir = path.join(__dirname, '.wwebjs_auth', `session-client_${id}`);
+    for (let attempt = 0; attempt < 10; attempt++) {
+        cleanStaleLockfiles(id);
+        try {
+            if (!fs.existsSync(authDir)) return true;
+            fs.rmSync(authDir, { recursive: true, force: true });
+            console.log(`[Bridge-Biz-${id}] Successfully cleaned auth directory`);
+            return true;
+        } catch (e) {
+            console.warn(`[Bridge-Biz-${id}] Cleanup attempt ${attempt + 1}/10 waiting for file locks:`, e.message);
+            await new Promise(r => setTimeout(r, 600));
+        }
+    }
+    return false;
+}
+
+async function safelyTerminateClient(targetClient) {
+    if (!targetClient) return;
+    try {
+        const proc = targetClient.pupBrowser?.process?.();
+        const pid = proc?.pid;
+        try {
+            await targetClient.destroy();
+        } catch (e) {
+            console.warn('[Bridge] Client destroy warning:', e.message);
+        }
+        if (pid) {
+            try {
+                if (process.platform === 'win32') {
+                    require('child_process').execSync(`taskkill /F /T /PID ${pid} 2>nul`);
+                } else {
+                    proc.kill('SIGKILL');
+                }
+            } catch (_) {}
+        }
+    } catch (err) {
+        console.warn('[Bridge] safelyTerminateClient warning:', err.message);
+    }
+}
+
+// ── AI Settings Cache per Business ─────────────────────────────────
+const _settingsCache = new Map();
+const SETTINGS_CACHE_TTL = 30000; // 30s
+
+async function getCachedSettings(businessId) {
+    const id = parseInt(businessId) || 1;
+    const now = Date.now();
+    const cached = _settingsCache.get(id);
+    if (cached && (now - cached.time) < SETTINGS_CACHE_TTL) {
+        return cached.data;
+    }
+    try {
+        const res = await axios.get(`${BACKEND_URL}/api/ai-settings?business_id=${id}`, { timeout: 5000 });
+        _settingsCache.set(id, { data: res.data, time: now });
+        return res.data;
+    } catch (err) {
+        console.error(`[Bridge-Biz-${id}] Failed to fetch AI settings:`, err.message);
+        return cached ? cached.data : null;
+    }
+}
+
+// ── Global Error Handlers ───────────────────────────────────────────
+process.on('unhandledRejection', (reason) => {
     console.error('[Bridge] Unhandled Rejection:', reason);
 });
 
 process.on('uncaughtException', (err) => {
     console.error('[Bridge] Uncaught Exception:', err.message);
-    // Don't exit — let the process recover
 });
 
-// ── WhatsApp Client ──────────────────────────────────────────────────
-function createClient() {
+// ── Session Creation & Lifecycle ────────────────────────────────────
+function createClient(businessId) {
+    const id = parseInt(businessId) || 1;
+    cleanStaleLockfiles(id);
+
     return new Client({
-        authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-        authTimeoutMs: 0,
+        authStrategy: new LocalAuth({
+            clientId: `client_${id}`,
+            dataPath: path.join(__dirname, '.wwebjs_auth'),
+        }),
+        authTimeoutMs: 60000,
         takeoverOnConflict: true,
         takeoverTimeoutMs: 10000,
         webVersionCache: {
@@ -67,8 +151,9 @@ function createClient() {
         },
         puppeteer: {
             executablePath: puppeteer.executablePath(),
-            headless: 'new',
-            timeout: 90000,
+            headless: true,
+            pipe: true,
+            timeout: 120000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -77,213 +162,465 @@ function createClient() {
                 '--no-first-run',
                 '--disable-web-security',
                 '--disable-features=IsolateOrigins,site-per-process',
+                '--disable-blink-features=AutomationControlled',
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36',
             ],
         },
     });
 }
 
-function initClient() {
-    client = createClient();
-    latestQR = null;
-    isConnected = false;
-    connectionInfo = null;
-    initError = null;
+function initSession(businessId) {
+    const session = getSession(businessId);
+    if (session.initializing || session.isConnected) {
+        return session;
+    }
+
+    session.initializing = true;
+    session.connectionState = 'starting';
+    session.latestQR = null;
+    session.isConnected = false;
+    session.connectionInfo = null;
+    session.initError = null;
+    session.loadingProgress = { percent: 0, message: 'Initializing browser...' };
+
+    console.log(`[Bridge-Biz-${session.businessId}] Initializing WhatsApp client...`);
+
+    try {
+        session.client = createClient(session.businessId);
+    } catch (e) {
+        console.error(`[Bridge-Biz-${session.businessId}] Error creating client:`, e);
+        session.connectionState = 'auth_failure';
+        session.initError = e.message;
+        session.initializing = false;
+        return session;
+    }
+
+    const client = session.client;
 
     client.on('loading_screen', (percent, message) => {
-        console.log(`[Bridge] Loading: ${percent}% - ${message}`);
+        console.log(`[Bridge-Biz-${session.businessId}] Loading: ${percent}% - ${message}`);
+        session.connectionState = 'syncing';
+        session.loadingProgress = { percent, message };
     });
 
     client.on('qr', async (qr) => {
-        console.log('[Bridge] QR code received');
+        console.log(`[Bridge-Biz-${session.businessId}] QR code received`);
+        session.connectionState = 'qr_ready';
+        session.initializing = false;
         try {
-            latestQR = await qrcode.toDataURL(qr, { width: 256 });
+            session.latestQR = await qrcode.toDataURL(qr, { width: 256, margin: 1 });
         } catch (err) {
-            console.error('[Bridge] QR encode error:', err);
-        }
-    });
-
-    client.on('ready', async () => {
-        console.log('[Bridge] Client is ready!');
-        isConnected = true;
-        latestQR = null;
-        initError = null;
-        readyTimestamp = Math.floor(Date.now() / 1000); // Unix timestamp in seconds
-        console.log(`[Bridge] Ready timestamp set: ${readyTimestamp} — will ignore older messages`);
-        try {
-            connectionInfo = client.info;
-            console.log('[Bridge] Connected as:', connectionInfo?.pushname);
-        } catch (err) {
-            console.error('[Bridge] Error getting info:', err);
+            console.error(`[Bridge-Biz-${session.businessId}] QR encode error:`, err);
         }
     });
 
     client.on('authenticated', () => {
-        console.log('[Bridge] Authenticated');
+        console.log(`[Bridge-Biz-${session.businessId}] Authenticated successfully with WhatsApp!`);
+        session.connectionState = 'authenticating';
+        session.latestQR = null;
+        session.loadingProgress = { percent: 50, message: 'Authenticated! Loading WhatsApp chats...' };
+
+        // Watchdog: If WhatsApp Web finishes loading chats in DOM before ready event fires
+        let readyCheckCount = 0;
+        const readyWatchdog = setInterval(async () => {
+            readyCheckCount++;
+            if (session.isConnected) {
+                clearInterval(readyWatchdog);
+                return;
+            }
+            try {
+                if (session.client && session.client.pupPage) {
+                    const isChatListVisible = await session.client.pupPage.evaluate(() => {
+                        return !!(document.querySelector('#pane-side') || document.querySelector('[data-testid="chat-list"]'));
+                    }).catch(() => false);
+
+                    if (isChatListVisible && !session.isConnected) {
+                        console.log(`[Bridge-Biz-${session.businessId}] WhatsApp chat list detected in DOM! Transitioning to connected.`);
+                        session.isConnected = true;
+                        session.connectionState = 'connected';
+                        session.loadingProgress = { percent: 100, message: 'Ready' };
+                        session.readyTimestamp = Math.floor(Date.now() / 1000);
+                        try {
+                            session.connectionInfo = session.client.info || await session.client.pupPage.evaluate(() => {
+                                const wid = window.Store?.User?.getMaybeMePnUser?.() || window.Store?.User?.getMaybeMeLidUser?.();
+                                return {
+                                    pushname: window.Store?.Conn?.pushname || 'WhatsApp User',
+                                    platform: 'WhatsApp Web',
+                                    wid: wid ? { user: wid.user, _serialized: wid._serialized } : null
+                                };
+                            });
+                        } catch (e) {
+                            session.connectionInfo = { pushname: 'WhatsApp User', platform: 'WhatsApp Web' };
+                        }
+                        clearInterval(readyWatchdog);
+                    }
+                }
+            } catch (wErr) {
+                console.warn(`[Bridge-Biz-${session.businessId}] Watchdog check error:`, wErr.message);
+            }
+
+            if (readyCheckCount > 25) {
+                clearInterval(readyWatchdog);
+            }
+        }, 4000);
+    });
+
+    client.on('ready', async () => {
+        console.log(`[Bridge-Biz-${session.businessId}] Client is ready! WhatsApp is fully connected.`);
+        session.isConnected = true;
+        session.connectionState = 'connected';
+        session.latestQR = null;
+        session.initError = null;
+        session.initializing = false;
+        session.loadingProgress = { percent: 100, message: 'Ready' };
+        session.readyTimestamp = Math.floor(Date.now() / 1000);
+
+        try {
+            session.connectionInfo = client.info;
+            console.log(`[Bridge-Biz-${session.businessId}] Connected as:`, session.connectionInfo?.pushname, session.connectionInfo?.wid?.user);
+        } catch (err) {
+            console.error(`[Bridge-Biz-${session.businessId}] Error getting info:`, err);
+        }
     });
 
     client.on('auth_failure', (msg) => {
-        console.error('[Bridge] Auth failure:', msg);
-        isConnected = false;
-        initError = 'Authentication failed: ' + msg;
+        console.error(`[Bridge-Biz-${session.businessId}] Auth failure:`, msg);
+        session.isConnected = false;
+        session.connectionState = 'auth_failure';
+        session.initError = 'Authentication failed: ' + msg;
+        session.initializing = false;
     });
 
     client.on('disconnected', (reason) => {
-        console.log('[Bridge] Disconnected:', reason);
-        isConnected = false;
-        connectionInfo = null;
+        console.log(`[Bridge-Biz-${session.businessId}] Disconnected:`, reason);
+        session.isConnected = false;
+        session.connectionState = 'disconnected';
+        session.connectionInfo = null;
+        session.latestQR = null;
+        session.initializing = false;
     });
 
     client.on('message', async (msg) => {
         try {
             if (msg.fromMe) return;
 
-            // Skip old messages that arrived before the client was ready
-            if (readyTimestamp && msg.timestamp && msg.timestamp < readyTimestamp) {
-                return; // Silently ignore old messages
-            }
-
-            // Skip status updates, broadcasts, and newsletters — never interact with these
+            // Skip status updates, broadcasts, newsletters
             if (msg.from === 'status@broadcast' || msg.from.includes('@broadcast') || msg.from.includes('@newsletter')) return;
             if (msg.isStatus) return;
 
-            // Get cached settings (single fetch, not two)
-            const settings = await getCachedSettings();
+            // Ignore system/protocol events (e2e encryption notices, call logs, stub notifications)
+            const IGNORED_TYPES = ['e2e_notification', 'notification', 'notification_template', 'protocol', 'call_log', 'gp2', 'ciphertext'];
+            if (IGNORED_TYPES.includes(msg.type)) return;
 
-            // Handle group messages — check backend setting
-            if (msg.from.includes('@g.us')) {
-                if (!settings || !settings.group_replies) return;
+            const bodyText = (msg.body || '').trim();
+            // If message has neither text nor media, it is not a customer message (e.g. sync stub) — ignore completely
+            if (!bodyText && !msg.hasMedia) return;
+
+            const msgTime = msg.timestamp || Math.floor(Date.now() / 1000);
+            if (msgTime < (BRIDGE_BOOT_TIME - 180)) return;
+
+            // Live message check
+            const isLiveMessage = Boolean(session.isConnected && session.readyTimestamp && (msgTime >= (session.readyTimestamp - 2)));
+
+            // Fetch AI settings for this specific business
+            const settings = await getCachedSettings(session.businessId);
+
+            const isGroup = msg.from.includes('@g.us');
+            let name = 'Unknown';
+            let isSavedContact = false;
+            let phone = msg.from.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
+
+            try {
+                const contact = await msg.getContact();
+                if (contact) {
+                    name = contact.pushname || contact.name || contact.verifiedName || contact.shortName || 'Unknown';
+                    isSavedContact = Boolean(contact.isMyContact);
+                    if (contact.number) {
+                        phone = contact.number;
+                    } else if (contact.id && contact.id.user && !contact.id._serialized.includes('@lid')) {
+                        phone = contact.id.user;
+                    }
+                }
+            } catch (cErr) {
+                console.warn(`[Bridge-Biz-${session.businessId}] getContact error:`, cErr.message);
             }
 
-            // Strip all WhatsApp suffixes: @c.us, @g.us, @lid
-            const phone = msg.from.replace(/@c\.us$/, '').replace(/@g\.us$/, '').replace(/@lid$/, '');
-            const contact = await msg.getContact();
-            const name = contact?.pushname || contact?.name || 'Unknown';
-            const isGroup = msg.from.includes('@g.us');
-            const isSavedContact = contact?.isMyContact || false;
-
-            // Check if we should skip saved contacts
-            if (!isGroup && isSavedContact) {
-                if (settings && !settings.reply_to_contacts) {
-                    console.log(`[Bridge] Skipping saved contact: ${name} (${phone})`);
-                    return;
+            if (name === 'Unknown' || !name) {
+                if (msg._data && msg._data.notifyName) {
+                    name = msg._data.notifyName;
                 }
             }
 
-            console.log(`[Bridge] ${isGroup ? 'Group' : isSavedContact ? 'Contact' : 'New'} message from ${name} (${phone}): ${(msg.body || '').substring(0, 50)}...`);
+            if (isGroup) {
+                try {
+                    const chat = await msg.getChat();
+                    if (chat && chat.name) {
+                        name = chat.name;
+                    }
+                } catch (gErr) {
+                    console.warn(`[Bridge-Biz-${session.businessId}] getChat error for group:`, gErr.message);
+                }
+            }
 
-            // Send to backend with clean phone + original msg.from for reply routing
+            const hasText = bodyText.length > 0;
+            let shouldReply = isLiveMessage && hasText;
+
+            // Group messages filter
+            if (isGroup) {
+                if (!settings || Number(settings.group_replies) !== 1) {
+                    shouldReply = false;
+                }
+            }
+
+            // Saved contacts filter
+            if (!isGroup && isSavedContact) {
+                if (!settings || Number(settings.reply_to_contacts) !== 1) {
+                    shouldReply = false;
+                }
+            }
+
+            const outgoingText = bodyText || `[${msg.type || 'media'} received]`;
+            console.log(`[Bridge-Biz-${session.businessId}] ${isGroup ? 'Group' : isSavedContact ? 'Contact' : 'New'} message from ${name} (${phone}): "${outgoingText.substring(0, 45)}" | should_reply=${shouldReply} | isLive=${isLiveMessage}`);
+
+            // Forward to backend with this session's business_id
             await axios.post(`${BACKEND_URL}/api/whatsapp/webhook`, {
                 phone: isGroup ? msg.from : phone,
-                message: msg.body || '',
+                message: outgoingText,
                 name: name,
-                business_id: 1,
+                business_id: session.businessId,
                 is_group: isGroup,
-                reply_to: msg.from, // Preserve original WhatsApp ID for sending replies
+                reply_to: msg.from,
+                should_reply: shouldReply,
             }, { timeout: 30000 });
         } catch (err) {
-            console.error('[Bridge] Message handler error:', err.message);
+            console.error(`[Bridge-Biz-${session.businessId}] Message handler error:`, err.message);
         }
     });
 
-    console.log('[Bridge] Initializing WhatsApp client...');
     client.initialize().catch(err => {
-        console.error('[Bridge] Init error:', err.message);
-        initError = err.message;
+        console.error(`[Bridge-Biz-${session.businessId}] Init error:`, err.message);
+        session.connectionState = 'auth_failure';
+        session.initError = err.message;
+        session.initializing = false;
     });
+
+    return session;
+}
+
+// ── Auto-Start Saved Sessions at Boot ───────────────────────────────
+function autoStartSavedSessions() {
+    const authDir = path.join(__dirname, '.wwebjs_auth');
+    try {
+        if (!fs.existsSync(authDir)) return;
+
+        // Migrate legacy un-prefixed session folder to session-client_1 if needed
+        const legacyDir = path.join(authDir, 'session');
+        const biz1Dir = path.join(authDir, 'session-client_1');
+        if (fs.existsSync(legacyDir) && !fs.existsSync(biz1Dir)) {
+            try {
+                fs.renameSync(legacyDir, biz1Dir);
+                console.log('[Bridge] Migrated legacy session to session-client_1');
+            } catch (mErr) {
+                console.warn('[Bridge] Could not migrate legacy session:', mErr.message);
+            }
+        }
+
+        const entries = fs.readdirSync(authDir, { withFileTypes: true });
+        let startedCount = 0;
+        for (const entry of entries) {
+            if (entry.isDirectory() && entry.name.startsWith('session-client_')) {
+                const match = entry.name.match(/^session-client_(\d+)$/);
+                if (match) {
+                    const bid = parseInt(match[1]);
+                    console.log(`[Bridge] Found saved session for Business ${bid}. Auto-starting...`);
+                    initSession(bid);
+                    startedCount++;
+                }
+            }
+        }
+        if (startedCount === 0) {
+            console.log('[Bridge] No existing client sessions found. Initializing Business 1 by default...');
+            initSession(1);
+        }
+    } catch (e) {
+        console.warn('[Bridge] Error checking saved sessions:', e.message);
+        initSession(1);
+    }
 }
 
 // ── API Routes ───────────────────────────────────────────────────────
 
 app.get('/health', (req, res) => {
-    res.json({ status: 'healthy', connected: isConnected, uptime: process.uptime() });
+    const activeSessions = [];
+    for (const [id, s] of sessions.entries()) {
+        activeSessions.push({ business_id: id, state: s.connectionState, connected: s.isConnected });
+    }
+    res.json({
+        status: 'healthy',
+        activeSessions,
+        uptime: process.uptime()
+    });
 });
 
 app.get('/status', (req, res) => {
+    const bid = parseInt(req.query.business_id) || 1;
+    const session = getSession(bid);
+
     res.json({
-        connected: isConnected,
-        hasQR: !!latestQR,
-        info: connectionInfo ? { pushname: connectionInfo.pushname, platform: connectionInfo.platform } : null,
-        error: initError,
+        business_id: bid,
+        connected: session.isConnected,
+        state: session.connectionState,
+        hasQR: Boolean(session.latestQR),
+        qr: session.latestQR,
+        loading: session.loadingProgress,
+        info: session.connectionInfo ? {
+            pushname: session.connectionInfo.pushname || 'WhatsApp User',
+            platform: session.connectionInfo.platform || 'WhatsApp Web',
+            phone: session.connectionInfo.wid ? session.connectionInfo.wid.user : '',
+            wid: session.connectionInfo.wid ? session.connectionInfo.wid._serialized : '',
+        } : null,
+        error: session.initError,
     });
 });
 
 app.get('/qr', (req, res) => {
-    res.json({ qr: latestQR });
+    const bid = parseInt(req.query.business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client && !session.initializing) {
+        initSession(bid);
+    }
+    res.json({
+        business_id: bid,
+        qr: session.latestQR,
+        state: session.connectionState
+    });
+});
+
+app.post('/init', (req, res) => {
+    const bid = parseInt(req.body?.business_id || req.query.business_id) || 1;
+    const session = initSession(bid);
+    res.json({ success: true, business_id: bid, state: session.connectionState });
+});
+
+app.get('/chats', async (req, res) => {
+    const bid = parseInt(req.query.business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.json({ success: false, connected: false, chats: [], business_id: bid });
+    }
+    try {
+        const chats = await session.client.getChats();
+        const formatted = chats.slice(0, 60).map(c => {
+            const lastMsg = c.lastMessage;
+            return {
+                id: c.id._serialized,
+                name: c.name || c.id.user || 'Unknown',
+                phone: c.id.user || '',
+                isGroup: c.isGroup,
+                unreadCount: c.unreadCount || 0,
+                timestamp: c.timestamp ? c.timestamp * 1000 : (lastMsg?.timestamp ? lastMsg.timestamp * 1000 : null),
+                lastMessage: lastMsg ? {
+                    body: lastMsg.body || (lastMsg.type !== 'chat' ? `[${lastMsg.type}]` : ''),
+                    timestamp: lastMsg.timestamp ? lastMsg.timestamp * 1000 : null,
+                    fromMe: lastMsg.fromMe,
+                } : null,
+            };
+        });
+        res.json({ success: true, connected: true, chats: formatted, business_id: bid });
+    } catch (err) {
+        console.error(`[Bridge-Biz-${bid}] Failed to fetch chats:`, err.message);
+        res.status(500).json({ success: false, error: err.message, chats: [], business_id: bid });
+    }
+});
+
+app.get('/chats/:chatId/messages', async (req, res) => {
+    const bid = parseInt(req.query.business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.status(503).json({ success: false, error: 'Not connected' });
+    }
+    try {
+        const { chatId } = req.params;
+        const chat = await session.client.getChatById(chatId);
+        const limit = parseInt(req.query.limit) || 40;
+        const messages = await chat.fetchMessages({ limit });
+        const formatted = messages.map(m => ({
+            id: m.id._serialized,
+            body: m.body,
+            fromMe: m.fromMe,
+            sender: m.author || m.from,
+            timestamp: m.timestamp * 1000,
+            hasMedia: m.hasMedia,
+            type: m.type,
+        }));
+        res.json({ success: true, messages: formatted });
+    } catch (err) {
+        console.error(`[Bridge-Biz-${bid}] Failed to fetch messages:`, err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
 });
 
 app.post('/send', async (req, res) => {
-    const { phone, message } = req.body || {};
-    if (!phone || !message) return res.status(400).json({ success: false, error: 'Missing phone or message' });
-    if (!client || !isConnected) return res.status(503).json({ success: false, error: 'Not connected' });
-    try {
-        // If phone already has @ suffix, use it directly; otherwise try @lid then @c.us
-        let chatId;
-        if (phone.includes('@')) {
-            chatId = phone;
-        } else {
-            // Try @lid first (newer format), fallback to @c.us
-            try {
-                chatId = `${phone}@lid`;
-                await client.sendMessage(chatId, message);
-                console.log(`[Bridge] Sent to ${phone} via @lid`);
-                return res.json({ success: true });
-            } catch (lidErr) {
-                console.log(`[Bridge] @lid failed for ${phone}, trying @c.us: ${lidErr.message}`);
-                chatId = `${phone}@c.us`;
-            }
-        }
-        await client.sendMessage(chatId, message);
-        console.log(`[Bridge] Sent to ${phone} via ${chatId.includes('@lid') ? '@lid' : '@c.us'}`);
-        res.json({ success: true });
-    } catch (err) {
-        console.error('[Bridge] Send error:', err.message);
-        res.status(500).json({ success: false, error: err.message });
+    const { business_id, phone, message } = req.body || {};
+    if (!phone || !message) {
+        return res.status(400).json({ success: false, error: 'Missing phone or message' });
     }
-});
-
-app.post('/logout', async (req, res) => {
-    try {
-        if (client) await client.logout();
-        isConnected = false;
-        connectionInfo = null;
-        latestQR = null;
-        res.json({ success: true });
-        setTimeout(() => initClient(), 2000);
-    } catch (err) {
-        console.error('[Bridge] Logout error:', err.message);
-        res.status(500).json({ success: false, error: err.message });
+    const bid = parseInt(business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.status(503).json({ success: false, error: `WhatsApp not connected for business ${bid}` });
     }
-});
 
-app.post('/restart', async (req, res) => {
     try {
-        if (client) {
-            try { await client.destroy(); } catch (e) {
-                console.warn('[Bridge] Client destroy warning:', e.message);
-            }
+        let chatId = String(phone).trim();
+
+        // 1. If it already has domain (@c.us, @g.us, or @lid), send directly
+        if (chatId.includes('@')) {
+            await session.client.sendMessage(chatId, message);
+            console.log(`[Bridge-Biz-${bid}] Sent directly to ${chatId}`);
+            return res.json({ success: true, target: chatId });
         }
-        isConnected = false;
-        connectionInfo = null;
-        latestQR = null;
-        res.json({ success: true, message: 'Restarting...' });
-        setTimeout(() => initClient(), 2000);
+
+        // 2. Pure phone number
+        const cleanPhone = chatId.replace(/\D/g, '');
+        if (!cleanPhone) {
+            return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+        }
+
+        // 3. Resolve registered WhatsApp ID via getNumberId
+        try {
+            const numberDetails = await session.client.getNumberId(cleanPhone);
+            if (numberDetails && numberDetails._serialized) {
+                chatId = numberDetails._serialized;
+            } else {
+                chatId = `${cleanPhone}@c.us`;
+            }
+        } catch (lookupErr) {
+            chatId = `${cleanPhone}@c.us`;
+        }
+
+        await session.client.sendMessage(chatId, message);
+        console.log(`[Bridge-Biz-${bid}] Successfully sent to ${chatId}`);
+        res.json({ success: true, target: chatId });
     } catch (err) {
-        console.error('[Bridge] Restart error:', err.message);
+        console.error(`[Bridge-Biz-${bid}] Send error:`, err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
 app.post('/send-media', async (req, res) => {
-    const { phone, mediaUrl, filename, caption } = req.body || {};
+    const { business_id, phone, mediaUrl, filename, caption } = req.body || {};
     if (!phone || !mediaUrl) return res.status(400).json({ success: false, error: 'Missing phone or mediaUrl' });
-    if (!client || !isConnected) return res.status(503).json({ success: false, error: 'Not connected' });
+    const bid = parseInt(business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.status(503).json({ success: false, error: `Not connected for business ${bid}` });
+    }
+
     try {
-        const { MessageMedia } = require('whatsapp-web.js');
-        // Download the file from backend
         const response = await axios.get(mediaUrl, { responseType: 'arraybuffer', timeout: 30000 });
         const base64 = Buffer.from(response.data).toString('base64');
 
-        // Detect MIME type from filename
         const ext = (filename || '').split('.').pop().toLowerCase();
         const mimeMap = {
             jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp',
@@ -293,41 +630,133 @@ app.post('/send-media', async (req, res) => {
         const mimetype = mimeMap[ext] || 'application/octet-stream';
 
         const media = new MessageMedia(mimetype, base64, filename || 'file');
-        const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
-        await client.sendMessage(chatId, media, { caption: caption || '' });
-        console.log(`[Bridge] Sent media to ${phone}: ${filename}`);
+        let chatId = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
+        await session.client.sendMessage(chatId, media, { caption: caption || '' });
+        console.log(`[Bridge-Biz-${bid}] Sent media to ${chatId}: ${filename}`);
         res.json({ success: true });
     } catch (err) {
-        console.error('[Bridge] Send media error:', err.message);
+        console.error(`[Bridge-Biz-${bid}] Send media error:`, err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
 app.post('/typing', async (req, res) => {
-    const { phone } = req.body || {};
+    const { business_id, phone } = req.body || {};
     if (!phone) return res.status(400).json({ success: false, error: 'Missing phone' });
-    if (!client || !isConnected) return res.status(503).json({ success: false, error: 'Not connected' });
+    const bid = parseInt(business_id) || 1;
+    const session = getSession(bid);
+    if (!session.client || !session.isConnected) {
+        return res.status(503).json({ success: false, error: `Not connected for business ${bid}` });
+    }
+
     try {
-        const chatId = phone.includes('@') ? phone : `${phone}@c.us`;
-        const chat = await client.getChatById(chatId);
+        let chatId = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
+        const chat = await session.client.getChatById(chatId);
         await chat.sendStateTyping();
         res.json({ success: true });
     } catch (err) {
-        console.error('[Bridge] Typing error:', err.message);
+        console.error(`[Bridge-Biz-${bid}] Typing error:`, err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
 
+app.post('/logout', async (req, res) => {
+    const bid = parseInt(req.body?.business_id || req.query.business_id) || 1;
+    const session = getSession(bid);
+
+    try {
+        const oldClient = session.client;
+        session.client = null;
+        session.isConnected = false;
+        session.connectionState = 'disconnected';
+        session.connectionInfo = null;
+        session.latestQR = null;
+        session.initError = null;
+        session.initializing = false;
+
+        if (oldClient) {
+            try {
+                await oldClient.logout();
+            } catch (e) {
+                console.warn(`[Bridge-Biz-${bid}] Logout warning:`, e.message);
+            }
+            await safelyTerminateClient(oldClient);
+        }
+
+        res.json({ success: true, business_id: bid });
+
+        // Clean auth files for this business and reinitialize with a fresh QR code
+        setTimeout(async () => {
+            await cleanAuthSessionAsync(bid);
+            initSession(bid);
+        }, 1200);
+    } catch (err) {
+        console.error(`[Bridge-Biz-${bid}] Logout endpoint error:`, err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+app.post('/restart', async (req, res) => {
+    const bid = parseInt(req.body?.business_id || req.query.business_id) || 1;
+    const session = getSession(bid);
+
+    try {
+        const oldClient = session.client;
+        session.client = null;
+        session.isConnected = false;
+        session.connectionState = 'starting';
+        session.connectionInfo = null;
+        session.latestQR = null;
+        session.initError = null;
+        session.initializing = false;
+
+        if (oldClient) {
+            await safelyTerminateClient(oldClient);
+        }
+
+        res.json({ success: true, message: 'Restarting...', business_id: bid });
+
+        setTimeout(async () => {
+            cleanStaleLockfiles(bid);
+            initSession(bid);
+        }, 1200);
+    } catch (err) {
+        console.error(`[Bridge-Biz-${bid}] Restart error:`, err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
+// Clean up completely when a client is deleted
+app.delete('/session/:businessId', async (req, res) => {
+    const bid = parseInt(req.params.businessId);
+    if (!bid) return res.status(400).json({ success: false, error: 'Invalid business ID' });
+
+    console.log(`[Bridge] Deleting session storage and client for Business ${bid}...`);
+    if (sessions.has(bid)) {
+        const session = sessions.get(bid);
+        if (session.client) {
+            await safelyTerminateClient(session.client);
+        }
+        sessions.delete(bid);
+    }
+
+    await cleanAuthSessionAsync(bid);
+    res.json({ success: true, message: `Session for business ${bid} deleted` });
+});
+
 // ── Graceful Shutdown ────────────────────────────────────────────────
 async function shutdown(signal) {
-    console.log(`[Bridge] Received ${signal}, shutting down gracefully...`);
-    try {
-        if (client) {
-            await client.destroy();
-            console.log('[Bridge] WhatsApp client destroyed');
+    console.log(`[Bridge] Received ${signal}, shutting down all client sessions gracefully...`);
+    for (const [id, session] of sessions.entries()) {
+        try {
+            if (session.client) {
+                await safelyTerminateClient(session.client);
+                console.log(`[Bridge-Biz-${id}] Client terminated`);
+            }
+        } catch (e) {
+            console.error(`[Bridge-Biz-${id}] Error during shutdown:`, e.message);
         }
-    } catch (e) {
-        console.error('[Bridge] Error during shutdown:', e.message);
+        cleanStaleLockfiles(id);
     }
     process.exit(0);
 }
@@ -337,6 +766,6 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Start Server ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
-    console.log(`[Bridge] Running on port ${PORT}`);
-    initClient();
+    console.log(`[Bridge] Multi-session bridge running on port ${PORT}`);
+    autoStartSavedSessions();
 });

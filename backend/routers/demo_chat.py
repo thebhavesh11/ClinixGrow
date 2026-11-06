@@ -69,14 +69,13 @@ async def demo_send(body: dict, db: AsyncSession = Depends(get_db)):
         appt_context = await _build_appointment_context(db, bid, lead.id)
         ai_reply = await generate_ai_reply(ai_settings, business, history, message, media_files, appt_context)
 
-        # 7. Clean tags
-        clean_reply = re.sub(r'\s*\[MEDIA:\d+\]\s*', ' ', ai_reply).strip()
-        appt_tags = re.findall(r'\[APPT:(\d{4}-\d{2}-\d{2})\|(\d{2}:\d{2})\]', ai_reply)
-        clean_reply = re.sub(r'\s*\[APPT:\d{4}-\d{2}-\d{2}\|\d{2}:\d{2}\]\s*', ' ', clean_reply).strip()
-
-        # 8. Book appointments from tags
+        # 7. Parse [BOOK: Date | Time | Details] tags for appointments
+        book_match = re.search(r'\[BOOK:\s*([^|]+)\|\s*([^|]+)\|\s*([^\]]+)\]', ai_reply, re.IGNORECASE)
         booked = []
-        for appt_date, appt_time in appt_tags:
+        if book_match:
+            appt_date, appt_time, details = book_match.groups()
+            appt_date = appt_date.strip()
+            appt_time = appt_time.strip()
             try:
                 target_dt = datetime.strptime(appt_date, "%Y-%m-%d")
                 wh = (await db.execute(
@@ -89,7 +88,7 @@ async def demo_send(body: dict, db: AsyncSession = Depends(get_db)):
                     select(Appointment).where(Appointment.business_id == bid, Appointment.date == appt_date, Appointment.status == "confirmed")
                 )).scalars().all()
                 if not any(not (end_time <= c.start_time or appt_time >= c.end_time) for c in conflicts):
-                    db.add(Appointment(business_id=bid, lead_id=lead.id, title="Demo Appointment",
+                    db.add(Appointment(business_id=bid, lead_id=lead.id, title=details.strip()[:100],
                                        date=appt_date, start_time=appt_time, end_time=end_time,
                                        status="confirmed", booked_by="ai-demo"))
                     await db.flush()
@@ -97,6 +96,10 @@ async def demo_send(body: dict, db: AsyncSession = Depends(get_db)):
                     logger.info(f"[DemoChat] Booked: {appt_date} {appt_time}-{end_time}")
             except Exception as e:
                 logger.error(f"[DemoChat] Booking error: {e}")
+
+        # 8. Clean tags
+        clean_reply = re.sub(r'\s*\[BOOK:.*?\]\s*', ' ', ai_reply, flags=re.IGNORECASE).strip()
+        clean_reply = re.sub(r'\s*\[MEDIA:\d+\]\s*', ' ', clean_reply).strip()
 
         # 9. Save AI reply
         db.add(Message(conversation_id=conv.id, sender_type="ai", message_text=clean_reply))

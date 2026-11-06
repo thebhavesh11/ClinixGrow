@@ -1,7 +1,9 @@
 """Client management router — create, list, update, delete clients with auto-seeding."""
 
 import logging
+import os
 import secrets
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
@@ -25,6 +27,9 @@ class ClientStats(BaseModel):
     name: str
     industry: str = ""
     location: str = ""
+    portal_token: Optional[str] = None
+    has_portal_pin: bool = False
+    logo_url: Optional[str] = ""
     created_at: Optional[str] = None
     leads_count: int = 0
     conversations_count: int = 0
@@ -44,6 +49,14 @@ class ClientCreate(BaseModel):
     location: str = ""
     offers: str = ""
     working_hours: str = ""
+    portal_pin: Optional[str] = None
+    logo_url: Optional[str] = ""
+
+
+class PortalSettingsUpdate(BaseModel):
+    portal_pin: Optional[str] = None
+    regenerate_token: bool = False
+    logo_url: Optional[str] = None
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -71,6 +84,9 @@ async def list_clients(db: AsyncSession = Depends(get_db)):
             name=biz.name,
             industry=biz.industry or "",
             location=biz.location or "",
+            portal_token=biz.portal_token,
+            has_portal_pin=bool(biz.portal_pin and biz.portal_pin.strip()),
+            logo_url=biz.logo_url or "",
             created_at=biz.created_at.isoformat() if biz.created_at else None,
             leads_count=leads_r.scalar() or 0,
             conversations_count=convos_r.scalar() or 0,
@@ -94,6 +110,9 @@ async def create_client(data: ClientCreate, db: AsyncSession = Depends(get_db)):
         location=data.location,
         offers=data.offers,
         working_hours=data.working_hours,
+        portal_token=f"portal_{secrets.token_urlsafe(16)}",
+        portal_pin=data.portal_pin.strip() if data.portal_pin else None,
+        logo_url=data.logo_url or "",
     )
     db.add(biz)
     await db.flush()
@@ -136,9 +155,40 @@ async def create_client(data: ClientCreate, db: AsyncSession = Depends(get_db)):
         name=biz.name,
         industry=biz.industry or "",
         location=biz.location or "",
+        portal_token=biz.portal_token,
+        has_portal_pin=bool(biz.portal_pin),
+        logo_url=biz.logo_url or "",
         created_at=biz.created_at.isoformat() if biz.created_at else None,
         leads_count=0, conversations_count=0, appointments_count=0, messages_count=0,
     )
+
+
+@router.post("/{client_id}/portal-settings")
+async def update_portal_settings(client_id: int, data: PortalSettingsUpdate, db: AsyncSession = Depends(get_db)):
+    """Update portal PIN, regenerate secret token, or update logo."""
+    result = await db.execute(select(Business).where(Business.id == client_id))
+    biz = result.scalar_one_or_none()
+    if not biz:
+        raise HTTPException(404, "Client not found")
+
+    if data.regenerate_token:
+        biz.portal_token = f"portal_{secrets.token_urlsafe(16)}"
+        logger.info(f"[Clients] Regenerated portal token for client {client_id}")
+
+    if data.portal_pin is not None:
+        biz.portal_pin = data.portal_pin.strip() if data.portal_pin.strip() else None
+
+    if data.logo_url is not None:
+        biz.logo_url = data.logo_url.strip()
+
+    await db.flush()
+    await db.refresh(biz)
+    return {
+        "success": True,
+        "portal_token": biz.portal_token,
+        "has_portal_pin": bool(biz.portal_pin),
+        "logo_url": biz.logo_url,
+    }
 
 
 @router.get("/{client_id}", response_model=BusinessResponse)
@@ -210,6 +260,15 @@ async def delete_client(client_id: int, db: AsyncSession = Depends(get_db)):
     # 8. Business itself
     await db.execute(delete(Business).where(Business.id == client_id))
     await db.flush()
+
+    # 9. Clean up WhatsApp session on bridge
+    bridge_url = os.getenv("WHATSAPP_BRIDGE_URL", "http://localhost:3001")
+    try:
+        async with httpx.AsyncClient(timeout=5) as http_client:
+            await http_client.delete(f"{bridge_url}/session/{client_id}")
+            logger.info(f"[Clients] Deleted WhatsApp session on bridge for client {client_id}")
+    except Exception as bridge_err:
+        logger.warning(f"[Clients] Could not notify bridge of deleted client {client_id}: {bridge_err}")
 
     logger.info(f"[Clients] Deleted client: {name!r} (id={client_id}) with all related data")
     return {"success": True, "message": f"Client '{name}' and all related data deleted"}

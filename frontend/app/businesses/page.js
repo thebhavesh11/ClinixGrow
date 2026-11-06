@@ -16,7 +16,21 @@ export default function Businesses() {
   const [media, setMedia] = useState([]);
   const [uploading, setUploading] = useState(false);
   const [editingMedia, setEditingMedia] = useState(null);
-  const { bUrl, selectedClientId } = useClient();
+  const { bUrl, selectedClientId, switchProfile, loadClients } = useClient();
+
+  const deleteCurrentClient = async () => {
+    if (!biz) return;
+    if (!confirm(`Are you sure you want to delete "${biz.name}"?\n\nThis will permanently delete ALL data for this client:\n- Leads\n- Conversations\n- Messages\n- Appointments\n- AI System Prompts & Settings\n- WhatsApp Session\n\nThis action cannot be undone!`)) return;
+
+    const [, err] = await safeFetch(`${API}/clients/${selectedClientId}`, { method: 'DELETE' });
+    if (err) {
+      showToast(err, 'error');
+      return;
+    }
+    showToast(`Client "${biz.name}" deleted!`, 'success');
+    await loadClients();
+    switchProfile();
+  };
 
   useEffect(() => {
     async function load() {
@@ -67,12 +81,26 @@ export default function Businesses() {
         </div>
       </div>
       <div className="card" style={{ padding: 0 }}>
-        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', gap: 12 }}>
-          <span style={{ fontSize: 32 }}>🏢</span>
-          <div><div style={{ fontWeight: 700, fontSize: 18 }}>{biz?.name||'My Business'}</div><div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{biz?.industry||''}</div></div>
+        <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <span style={{ fontSize: 32 }}>🏢</span>
+            <div><div style={{ fontWeight: 700, fontSize: 18 }}>{biz?.name||'My Business'}</div><div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>{biz?.industry||''}</div></div>
+          </div>
+          {biz?.portal_token && (
+            <a
+              href={`/portal/${biz.portal_token}`}
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-secondary"
+              style={{ fontSize: 12, padding: '6px 14px', display: 'flex', alignItems: 'center', gap: 6 }}
+              title="Open Client-Facing Portal"
+            >
+              <span>🔗 View Client Portal</span>
+            </a>
+          )}
         </div>
         <div className="tabs" style={{ padding: '0 24px' }}>
-          {['info','ai-agent','system-prompt','scoring-prompt','media','calendar'].map(t => (<div key={t} className={`tab ${tab===t?'active':''}`} onClick={()=>setTab(t)}>{t==='info'?'Info':t==='ai-agent'?'AI Agent':t==='system-prompt'?'System Prompt':t==='scoring-prompt'?'Scoring Prompt':t==='media'?`Media (${media.length})`:'Calendar'}</div>))}
+          {['info','ai-agent','system-prompt','scoring-prompt','automations','media','calendar'].map(t => (<div key={t} className={`tab ${tab===t?'active':''}`} onClick={()=>setTab(t)}>{t==='info'?'Info':t==='ai-agent'?'AI Agent':t==='system-prompt'?'System Prompt':t==='scoring-prompt'?'Scoring Prompt':t==='automations'?'Automations':t==='media'?`Media (${media.length})`:'Calendar'}</div>))}
         </div>
         <div style={{ padding: 24 }}>
           {tab==='info' && biz && (<>
@@ -83,6 +111,20 @@ export default function Businesses() {
             <div className="form-group"><label className="form-label">Current Offers</label><textarea className="form-textarea" style={{ minHeight: 60 }} value={biz.offers||''} onChange={e=>setBiz({...biz,offers:e.target.value})} /></div>
             <div className="form-group"><label className="form-label">FAQs</label><textarea className="form-textarea" style={{ minHeight: 80 }} value={biz.faqs||''} onChange={e=>setBiz({...biz,faqs:e.target.value})} /></div>
             <button className="btn btn-primary" onClick={saveBusiness} disabled={saving}>{saving?'⏳ Saving...':'Save Changes'}</button>
+
+            <div style={{ marginTop: 36, paddingTop: 20, borderTop: '1px solid rgba(239,68,68,0.2)' }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--danger)', marginBottom: 4 }}>⚠️ Danger Zone</div>
+              <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginBottom: 12 }}>
+                Permanently delete this client profile along with all associated leads, conversations, messages, and WhatsApp session.
+              </p>
+              <button
+                className="btn btn-secondary"
+                style={{ color: 'var(--danger)', borderColor: 'rgba(239,68,68,0.4)', fontSize: 12 }}
+                onClick={deleteCurrentClient}
+              >
+                🗑 Delete Client Profile
+              </button>
+            </div>
           </>)}
           {tab==='ai-agent' && ai && (<>
             <div className="grid-2">
@@ -98,6 +140,45 @@ export default function Businesses() {
           {tab==='system-prompt' && ai && (<>
             <div className="form-group"><label className="form-label">Response AI System Prompt</label><textarea className="form-textarea" style={{ minHeight: 180 }} placeholder="You are a professional customer assistant..." value={ai.system_prompt||''} onChange={e=>setAi({...ai,system_prompt:e.target.value})} /><p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6 }}>This prompt controls how the AI agent responds. Business info is appended as reference data automatically.</p></div>
             <button className="btn btn-primary" onClick={saveAI} disabled={saving}>{saving?'⏳ Saving...':'Save Prompts'}</button>
+          </>)}
+          {tab==='automations' && ai && (<>
+            <div className="card" style={{ marginBottom: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>⏰ Pre-Appointment Reminders</div>
+                <label className="switch"><input type="checkbox" checked={ai.reminder_enabled === 1} onChange={e => setAi({...ai, reminder_enabled: e.target.checked ? 1 : 0})} /><span className="slider round"></span></label>
+              </div>
+              {ai.reminder_enabled === 1 && (<>
+                <div className="form-group">
+                  <label className="form-label">Send reminder (minutes before)</label>
+                  <input type="number" className="form-input" value={ai.reminder_time_mins || 30} onChange={e => setAi({...ai, reminder_time_mins: parseInt(e.target.value)||30})} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Reminder Message Template</label>
+                  <textarea className="form-textarea" style={{ minHeight: 80 }} value={ai.reminder_message_template || ''} onChange={e => setAi({...ai, reminder_message_template: e.target.value})} />
+                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>Variables: {'{name}'}, {'{time}'}</p>
+                </div>
+              </>)}
+            </div>
+
+            <div className="card" style={{ marginBottom: 20 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>⭐ Post-Appointment Feedback</div>
+                <label className="switch"><input type="checkbox" checked={ai.feedback_enabled === 1} onChange={e => setAi({...ai, feedback_enabled: e.target.checked ? 1 : 0})} /><span className="slider round"></span></label>
+              </div>
+              {ai.feedback_enabled === 1 && (<>
+                <div className="form-group">
+                  <label className="form-label">Send feedback request (minutes after)</label>
+                  <input type="number" className="form-input" value={ai.feedback_time_mins || 120} onChange={e => setAi({...ai, feedback_time_mins: parseInt(e.target.value)||120})} />
+                </div>
+                <div className="form-group">
+                  <label className="form-label">Feedback Message Template</label>
+                  <textarea className="form-textarea" style={{ minHeight: 80 }} value={ai.feedback_message_template || ''} onChange={e => setAi({...ai, feedback_message_template: e.target.value})} />
+                  <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>Variables: {'{name}'}</p>
+                </div>
+              </>)}
+            </div>
+
+            <button className="btn btn-primary" onClick={saveAI} disabled={saving}>{saving?'⏳ Saving...':'Save Automations'}</button>
           </>)}
           {tab==='scoring-prompt' && ai && (<>
             <div className="form-group"><label className="form-label">Lead Scoring System Prompt</label><textarea className="form-textarea" style={{ minHeight: 200 }} placeholder={"Analyze this conversation and score the lead from 0-100.\n\nScoring criteria:\n- HOT (80-100): Ready to buy, has budget clarity, shows urgency\n- WARM (50-79): Interested but comparing options, needs nurturing\n- COLD (0-49): Just browsing, no budget mentioned, vague interest"} value={ai.scoring_prompt||''} onChange={e=>setAi({...ai,scoring_prompt:e.target.value})} /><p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 6, lineHeight: 1.7 }}>This prompt tells the AI how to score leads. The conversation history is appended automatically.<br/>The AI must return a JSON: <code style={{ background: 'var(--bg-input)', padding: '2px 6px', borderRadius: 4 }}>{'{"score": number, "label": "hot|warm|cold"}'}</code><br/>Leave empty to use the default scoring criteria.</p></div>
