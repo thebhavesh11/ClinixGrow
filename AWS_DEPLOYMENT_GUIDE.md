@@ -45,8 +45,8 @@ This script automatically:
 
 Start all 3 services in the background:
 ```bash
-# 1. Backend (FastAPI)
-pm2 start "/home/ubuntu/flowbot/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000" --name flowbot-backend
+# 1. Backend (FastAPI) — Note: --cwd is REQUIRED so Python finds main.py
+pm2 start "venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000" --cwd "/home/ubuntu/flowbot/backend" --name flowbot-backend
 
 # 2. WhatsApp Bridge (Node.js)
 pm2 start "node index.js" --cwd "/home/ubuntu/flowbot/whatsapp-bridge" --name flowbot-bridge
@@ -90,8 +90,8 @@ server {
     }
 
     # Backend API
-    location /api/ {
-        proxy_pass http://127.0.0.1:8000/api/;
+    location /api {
+        proxy_pass http://127.0.0.1:8000;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
