@@ -20,6 +20,15 @@ const PORT = 3001;
 const BACKEND_URL = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 const BRIDGE_BOOT_TIME = Math.floor(Date.now() / 1000);
 
+let InjectedStoreMod = null;
+let InjectedUtilsMod = null;
+try {
+    InjectedStoreMod = require('whatsapp-web.js/src/util/Injected/Store');
+    InjectedUtilsMod = require('whatsapp-web.js/src/util/Injected/Utils');
+} catch (e) {
+    console.warn('[Bridge] Notice: Injected modules will be loaded dynamically if needed');
+}
+
 // ── Multi-Session Store ─────────────────────────────────────────────
 // Map: businessId (number) -> SessionState
 const sessions = new Map();
@@ -38,6 +47,7 @@ function getSession(businessId) {
             loadingProgress: { percent: 0, message: '' },
             readyTimestamp: null,
             initializing: false,
+            listenersAttached: false,
         });
     }
     return sessions.get(id);
@@ -180,6 +190,16 @@ function createClient(businessId) {
     const id = parseInt(businessId) || 1;
     cleanStaleLockfiles(id);
 
+    let execPath = process.env.PUPPETEER_EXECUTABLE_PATH;
+    if (!execPath) {
+        try {
+            if (puppeteer && typeof puppeteer.executablePath === 'function') {
+                const p = puppeteer.executablePath();
+                if (p && fs.existsSync(p)) execPath = p;
+            }
+        } catch (_) {}
+    }
+
     return new Client({
         authStrategy: new LocalAuth({
             clientId: `client_${id}`,
@@ -192,7 +212,7 @@ function createClient(businessId) {
             type: 'none',
         },
         puppeteer: {
-            executablePath: puppeteer.executablePath(),
+            ...(execPath ? { executablePath: execPath } : {}),
             headless: true,
             pipe: true,
             timeout: 120000,
@@ -209,6 +229,70 @@ function createClient(businessId) {
             ],
         },
     });
+}
+
+// ── Resilient In-Page Injection & Listener Attachment ───────────────
+async function ensureReadyAndInjected(session) {
+    if (!session || !session.client || !session.client.pupPage) return false;
+    const page = session.client.pupPage;
+    try {
+        const domCheck = await page.evaluate(() => {
+            const hasPane = !!(document.querySelector('#pane-side') || document.querySelector('[data-testid="chat-list"]'));
+            const hasStore = typeof window.Store !== 'undefined';
+            const hasWWebJS = typeof window.WWebJS !== 'undefined' && typeof window.WWebJS.getChats === 'function';
+            return { hasPane, hasStore, hasWWebJS };
+        }).catch(() => null);
+
+        if (!domCheck || !domCheck.hasPane) return false;
+
+        // 1. Inject Store if missing
+        if (!domCheck.hasStore) {
+            console.log(`[Bridge-Biz-${session.businessId}] Store missing in page. Injecting ExposeStore...`);
+            try {
+                const storeMod = InjectedStoreMod || require('whatsapp-web.js/src/util/Injected/Store');
+                if (storeMod?.ExposeStore) {
+                    await page.evaluate(storeMod.ExposeStore);
+                }
+            } catch (sErr) {
+                console.warn(`[Bridge-Biz-${session.businessId}] ExposeStore fallback warning:`, sErr.message);
+            }
+        }
+
+        // 2. Inject WWebJS utils if missing
+        if (!domCheck.hasWWebJS) {
+            console.log(`[Bridge-Biz-${session.businessId}] WWebJS utils missing in page. Injecting LoadUtils...`);
+            try {
+                const utilsMod = InjectedUtilsMod || require('whatsapp-web.js/src/util/Injected/Utils');
+                if (utilsMod?.LoadUtils) {
+                    await page.evaluate(utilsMod.LoadUtils);
+                }
+            } catch (uErr) {
+                console.warn(`[Bridge-Biz-${session.businessId}] LoadUtils fallback warning:`, uErr.message);
+            }
+        }
+
+        // 3. Attach event listeners if client hasn't attached them yet
+        if (!session.listenersAttached && typeof session.client.attachEventListeners === 'function') {
+            try {
+                console.log(`[Bridge-Biz-${session.businessId}] Attaching WhatsApp event listeners...`);
+                await session.client.attachEventListeners();
+                session.listenersAttached = true;
+                console.log(`[Bridge-Biz-${session.businessId}] WhatsApp event listeners attached successfully!`);
+            } catch (aErr) {
+                console.warn(`[Bridge-Biz-${session.businessId}] attachEventListeners notice:`, aErr.message);
+                session.listenersAttached = true;
+            }
+        }
+
+        const isReady = await page.evaluate(() => {
+            return typeof window.WWebJS !== 'undefined' && typeof window.WWebJS.getChats === 'function';
+        }).catch(() => false);
+
+        return isReady;
+    } catch (err) {
+        console.error(`[Bridge-Biz-${session.businessId}] ensureReadyAndInjected error:`, err.message);
+        return false;
+    }
 }
 
 function initSession(businessId) {
@@ -262,11 +346,11 @@ function initSession(businessId) {
         session.latestQR = null;
         session.loadingProgress = { percent: 50, message: 'Authenticated! Loading WhatsApp chats...' };
 
-        // Watchdog: If WhatsApp Web finishes loading chats in DOM before ready event fires
+        // Watchdog: Ensure WhatsApp Web finishes loading chats in DOM and attaches listeners
         let readyCheckCount = 0;
         const readyWatchdog = setInterval(async () => {
             readyCheckCount++;
-            if (session.isConnected) {
+            if (session.isConnected && session.listenersAttached) {
                 clearInterval(readyWatchdog);
                 return;
             }
@@ -276,12 +360,19 @@ function initSession(businessId) {
                         return !!(document.querySelector('#pane-side') || document.querySelector('[data-testid="chat-list"]'));
                     }).catch(() => false);
 
-                    if (isChatListVisible && !session.isConnected) {
+                    if (isChatListVisible) {
                         console.log(`[Bridge-Biz-${session.businessId}] WhatsApp chat list detected in DOM! Transitioning to connected.`);
+                        
+                        // Ensure window.WWebJS, window.Store, and event listeners are injected
+                        await ensureReadyAndInjected(session);
+
                         session.isConnected = true;
                         session.connectionState = 'connected';
                         session.loadingProgress = { percent: 100, message: 'Ready' };
-                        session.readyTimestamp = Math.floor(Date.now() / 1000);
+                        if (!session.readyTimestamp) {
+                            session.readyTimestamp = Math.floor(Date.now() / 1000);
+                        }
+
                         try {
                             session.connectionInfo = session.client.info || await session.client.pupPage.evaluate(() => {
                                 const wid = window.Store?.User?.getMaybeMePnUser?.() || window.Store?.User?.getMaybeMeLidUser?.();
@@ -294,31 +385,35 @@ function initSession(businessId) {
                         } catch (e) {
                             session.connectionInfo = { pushname: 'WhatsApp User', platform: 'WhatsApp Web' };
                         }
+
                         clearInterval(readyWatchdog);
                         setTimeout(() => {
                             syncRecentChatsToBackend(session);
-                        }, 3000);
+                        }, 2500);
                     }
                 }
             } catch (wErr) {
                 console.warn(`[Bridge-Biz-${session.businessId}] Watchdog check error:`, wErr.message);
             }
 
-            if (readyCheckCount > 25) {
+            if (readyCheckCount > 35) {
                 clearInterval(readyWatchdog);
             }
-        }, 4000);
+        }, 3000);
     });
 
     client.on('ready', async () => {
         console.log(`[Bridge-Biz-${session.businessId}] Client is ready! WhatsApp is fully connected.`);
         session.isConnected = true;
         session.connectionState = 'connected';
+        session.listenersAttached = true;
         session.latestQR = null;
         session.initError = null;
         session.initializing = false;
         session.loadingProgress = { percent: 100, message: 'Ready' };
-        session.readyTimestamp = Math.floor(Date.now() / 1000);
+        if (!session.readyTimestamp) {
+            session.readyTimestamp = Math.floor(Date.now() / 1000);
+        }
 
         try {
             session.connectionInfo = client.info;
@@ -329,7 +424,7 @@ function initSession(businessId) {
 
         setTimeout(() => {
             syncRecentChatsToBackend(session);
-        }, 3000);
+        }, 2000);
     });
 
     client.on('auth_failure', (msg) => {
@@ -338,6 +433,7 @@ function initSession(businessId) {
         session.connectionState = 'auth_failure';
         session.initError = 'Authentication failed: ' + msg;
         session.initializing = false;
+        session.listenersAttached = false;
     });
 
     client.on('disconnected', (reason) => {
@@ -347,6 +443,7 @@ function initSession(businessId) {
         session.connectionInfo = null;
         session.latestQR = null;
         session.initializing = false;
+        session.listenersAttached = false;
     });
 
     client.on('message', async (msg) => {
@@ -632,24 +729,62 @@ app.get('/chats', async (req, res) => {
         return res.json({ success: false, connected: false, chats: [], business_id: bid });
     }
     try {
-        const chats = await session.client.getChats();
-        const formatted = chats.slice(0, 60).map(c => {
-            const lastMsg = c.lastMessage;
-            return {
-                id: c.id._serialized,
-                name: c.name || c.id.user || 'Unknown',
-                phone: c.id.user || '',
-                isGroup: c.isGroup,
-                unreadCount: c.unreadCount || 0,
-                timestamp: c.timestamp ? c.timestamp * 1000 : (lastMsg?.timestamp ? lastMsg.timestamp * 1000 : null),
-                lastMessage: lastMsg ? {
-                    body: lastMsg.body || (lastMsg.type !== 'chat' ? `[${lastMsg.type}]` : ''),
-                    timestamp: lastMsg.timestamp ? lastMsg.timestamp * 1000 : null,
-                    fromMe: lastMsg.fromMe,
-                } : null,
-            };
-        });
-        res.json({ success: true, connected: true, chats: formatted, business_id: bid });
+        await ensureReadyAndInjected(session);
+
+        let chats = [];
+        try {
+            chats = await session.client.getChats();
+            const formatted = chats.slice(0, 60).map(c => {
+                const lastMsg = c.lastMessage;
+                return {
+                    id: c.id?._serialized || c.id,
+                    name: c.name || c.id?.user || 'Unknown',
+                    phone: c.id?.user || '',
+                    isGroup: Boolean(c.isGroup),
+                    unreadCount: c.unreadCount || 0,
+                    timestamp: c.timestamp ? c.timestamp * 1000 : (lastMsg?.timestamp ? lastMsg.timestamp * 1000 : null),
+                    lastMessage: lastMsg ? {
+                        body: lastMsg.body || (lastMsg.type !== 'chat' ? `[${lastMsg.type}]` : ''),
+                        timestamp: lastMsg.timestamp ? lastMsg.timestamp * 1000 : null,
+                        fromMe: Boolean(lastMsg.fromMe),
+                    } : null,
+                };
+            });
+            return res.json({ success: true, connected: true, chats: formatted, business_id: bid });
+        } catch (cErr) {
+            console.warn(`[Bridge-Biz-${bid}] getChats threw, attempting Store.Chat fallback:`, cErr.message);
+            if (session.client.pupPage) {
+                const rawChats = await session.client.pupPage.evaluate(() => {
+                    const storeChats = window.Store?.Chat?.getModelsArray ? window.Store.Chat.getModelsArray() : (window.Store?.Chat?.models || []);
+                    if (!storeChats || !storeChats.length) return [];
+                    return storeChats.slice(0, 60).map(c => {
+                        let lastMsg = null;
+                        if (c.lastReceivedKey && window.Store?.Msg) {
+                            lastMsg = window.Store.Msg.get(c.lastReceivedKey._serialized);
+                        }
+                        if (!lastMsg && c.msgs && typeof c.msgs.last === 'function') {
+                            lastMsg = c.msgs.last();
+                        }
+                        const t = c.t ? c.t * 1000 : (lastMsg?.t ? lastMsg.t * 1000 : null);
+                        return {
+                            id: c.id?._serialized,
+                            name: c.name || c.formattedTitle || c.contact?.name || c.id?.user || 'Unknown',
+                            phone: c.id?.user || '',
+                            isGroup: Boolean(c.isGroup),
+                            unreadCount: c.unreadCount || 0,
+                            timestamp: t,
+                            lastMessage: lastMsg ? {
+                                body: lastMsg.body || (lastMsg.type && lastMsg.type !== 'chat' ? `[${lastMsg.type}]` : ''),
+                                timestamp: (lastMsg.t || lastMsg.timestamp) ? (lastMsg.t || lastMsg.timestamp) * 1000 : null,
+                                fromMe: Boolean(lastMsg.id?.fromMe),
+                            } : null,
+                        };
+                    });
+                }).catch(() => []);
+                return res.json({ success: true, connected: true, chats: rawChats, business_id: bid });
+            }
+            throw cErr;
+        }
     } catch (err) {
         console.error(`[Bridge-Biz-${bid}] Failed to fetch chats:`, err.message);
         res.status(500).json({ success: false, error: err.message, chats: [], business_id: bid });
@@ -664,6 +799,7 @@ app.get('/chats/:chatId/messages', async (req, res) => {
     }
     try {
         const { chatId } = req.params;
+        await ensureReadyAndInjected(session);
         const chat = await session.client.getChatById(chatId);
         const limit = parseInt(req.query.limit) || 40;
         const messages = await chat.fetchMessages({ limit });
@@ -687,11 +823,46 @@ async function syncRecentChatsToBackend(session) {
     if (!session || !session.client || !session.isConnected) return;
     try {
         console.log(`[Bridge-Biz-${session.businessId}] Starting initial chat sync from WhatsApp...`);
-        const chats = await session.client.getChats();
+        await ensureReadyAndInjected(session);
+
+        let chats = [];
+        try {
+            chats = await session.client.getChats();
+        } catch (getChatsErr) {
+            console.warn(`[Bridge-Biz-${session.businessId}] client.getChats() warning, falling back to direct Store query:`, getChatsErr.message);
+            if (session.client?.pupPage) {
+                chats = await session.client.pupPage.evaluate(() => {
+                    const storeChats = window.Store?.Chat?.getModelsArray ? window.Store.Chat.getModelsArray() : (window.Store?.Chat?.models || []);
+                    if (!storeChats || !storeChats.length) return [];
+                    return storeChats.slice(0, 50).map(c => {
+                        let lastMsg = null;
+                        if (c.lastReceivedKey && window.Store?.Msg) {
+                            lastMsg = window.Store.Msg.get(c.lastReceivedKey._serialized);
+                        }
+                        if (!lastMsg && c.msgs && typeof c.msgs.last === 'function') {
+                            lastMsg = c.msgs.last();
+                        }
+                        return {
+                            id: { _serialized: c.id?._serialized, user: c.id?.user },
+                            name: c.name || c.formattedTitle || c.contact?.name || c.id?.user || '',
+                            isGroup: Boolean(c.isGroup),
+                            lastMessage: lastMsg ? {
+                                body: lastMsg.body || (lastMsg.type && lastMsg.type !== 'chat' ? `[${lastMsg.type}]` : ''),
+                                timestamp: lastMsg.t || lastMsg.timestamp,
+                                fromMe: Boolean(lastMsg.id?.fromMe),
+                                type: lastMsg.type || 'chat',
+                                hasMedia: Boolean(lastMsg.isMedia || lastMsg.type === 'image' || lastMsg.type === 'video'),
+                            } : null,
+                        };
+                    });
+                }).catch(() => []);
+            }
+        }
+
         const syncPayload = [];
 
-        for (const c of chats.slice(0, 40)) {
-            const sId = c.id?._serialized || '';
+        for (const c of (chats || []).slice(0, 50)) {
+            const sId = c.id?._serialized || (typeof c.id === 'string' ? c.id : '');
             if (!sId || sId.includes('@broadcast') || sId.includes('@newsletter')) continue;
 
             const isGroup = Boolean(c.isGroup);
@@ -710,7 +881,7 @@ async function syncRecentChatsToBackend(session) {
                 business_id: session.businessId,
                 is_group: isGroup,
                 last_message: bodyText,
-                timestamp: lastMsg.timestamp ? lastMsg.timestamp : Math.floor(Date.now() / 1000),
+                timestamp: lastMsg.timestamp ? lastMsg.timestamp : (lastMsg.t ? lastMsg.t : Math.floor(Date.now() / 1000)),
                 from_me: Boolean(lastMsg.fromMe),
             });
         }
@@ -721,6 +892,8 @@ async function syncRecentChatsToBackend(session) {
                 chats: syncPayload,
             }, { timeout: 30000 });
             console.log(`[Bridge-Biz-${session.businessId}] Successfully synced ${syncPayload.length} WhatsApp chats to backend`);
+        } else {
+            console.log(`[Bridge-Biz-${session.businessId}] Chat sync: 0 chats to sync`);
         }
     } catch (err) {
         console.warn(`[Bridge-Biz-${session.businessId}] Chat sync warning:`, err.message);

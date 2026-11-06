@@ -20,6 +20,11 @@ pkill -f "node index.js" 2>/dev/null || true
 pkill -f "next-server" 2>/dev/null || true
 sleep 1
 
+# 2.5. Update WhatsApp bridge dependencies
+echo "[2.5/5] Updating WhatsApp bridge dependencies..."
+cd "$DIR/whatsapp-bridge"
+npm install --no-audit --no-fund
+
 # 3. Build Next.js frontend for production
 echo "[3/5] Building Next.js Frontend (this takes ~30 seconds)..."
 cd "$DIR/frontend"
@@ -62,3 +67,4 @@ echo ""
 echo "=========================================================="
 echo "  ✅ Services reset and started successfully!"
 echo "=========================================================="
+
