@@ -111,6 +111,16 @@ class AISettingResponse(AISettingBase):
 
 
 # ── Lead ──────────────────────────────────────────────────
+class LeadCreate(BaseModel):
+    phone_number: str
+    name: Optional[str] = "Unknown"
+    business_id: Optional[int] = 1
+    lead_status: Optional[str] = "new"
+    lead_score: Optional[int] = 50
+    summary: Optional[str] = ""
+    suggested_action: Optional[str] = ""
+
+
 class LeadResponse(BaseModel):
     id: int
     phone_number: str

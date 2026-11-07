@@ -29,6 +29,19 @@ export default function ClientPortal() {
   const [dateStats, setDateStats] = useState(null);
   const [loadingDateStats, setLoadingDateStats] = useState(false);
 
+  // Google Sheets Export states
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [exportStatus, setExportStatus] = useState('all');
+  const [exportDatePreset, setExportDatePreset] = useState('all');
+  const [exportStartDate, setExportStartDate] = useState('');
+  const [exportEndDate, setExportEndDate] = useState('');
+  const [copiedFormula, setCopiedFormula] = useState(false);
+
+  // Add Lead Modal states
+  const [showAddLeadModal, setShowAddLeadModal] = useState(false);
+  const [newLeadForm, setNewLeadForm] = useState({ name: '', phone_number: '', lead_status: 'hot', summary: '', suggested_action: '' });
+  const [savingLead, setSavingLead] = useState(false);
+
   // Chat Viewer state
   const [selectedLead, setSelectedLead] = useState(null);
   const [chatMessages, setChatMessages] = useState([]);
@@ -162,11 +175,53 @@ export default function ClientPortal() {
     }, 100);
   }
 
-  // Download leads CSV
-  function downloadLeadsCSV() {
-    const url = `${API}/portal/${token}/export-leads`;
+  // Trigger custom CSV export (opens in Google Sheets & Excel)
+  function triggerLeadsExport() {
+    const tz = -new Date().getTimezoneOffset();
+    let url = `${API}/portal/${token}/export-leads?tz_offset=${tz}`;
+    if (exportStatus && exportStatus !== 'all') url += `&status=${encodeURIComponent(exportStatus)}`;
+    if (exportDatePreset && exportDatePreset !== 'all') url += `&date_preset=${encodeURIComponent(exportDatePreset)}`;
+    if (exportDatePreset === 'custom') {
+      if (exportStartDate) url += `&start_date=${encodeURIComponent(exportStartDate)}`;
+      if (exportEndDate) url += `&end_date=${encodeURIComponent(exportEndDate)}`;
+    }
     window.open(url, '_blank');
-    showToast('Exporting leads to CSV...', 'success');
+    showToast('Downloading Google Sheets / Excel CSV...', 'success');
+    setShowExportModal(false);
+  }
+
+  // Google Sheets Live Sync Formula
+  function getGoogleSheetsFormula() {
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'https://smartflow55.xyz';
+    let url = `${origin}/api/portal/${token}/export-leads?tz_offset=330`;
+    if (exportStatus && exportStatus !== 'all') url += `&status=${encodeURIComponent(exportStatus)}`;
+    if (exportDatePreset && exportDatePreset !== 'all') url += `&date_preset=${encodeURIComponent(exportDatePreset)}`;
+    return `=IMPORTDATA("${url}")`;
+  }
+
+  // Save new lead manually
+  async function handleSaveNewLead(e) {
+    if (e) e.preventDefault();
+    if (!newLeadForm.phone_number.trim()) {
+      showToast('Please enter a phone number', 'error');
+      return;
+    }
+    setSavingLead(true);
+    const headers = getHeaders();
+    const [res, err] = await safeFetch(`${API}/portal/${token}/leads`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: JSON.stringify(newLeadForm),
+    });
+    setSavingLead(false);
+    if (res?.success) {
+      showToast(res.action === 'created' ? 'Lead saved successfully!' : 'Lead updated successfully!', 'success');
+      setShowAddLeadModal(false);
+      setNewLeadForm({ name: '', phone_number: '', lead_status: 'hot', summary: '', suggested_action: '' });
+      loadPortalData();
+    } else {
+      showToast(err || 'Failed to save lead', 'error');
+    }
   }
 
   // Filtered leads
@@ -333,12 +388,21 @@ export default function ClientPortal() {
             </div>
 
             <button
-              onClick={downloadLeadsCSV}
+              onClick={() => setShowAddLeadModal(true)}
               className="btn btn-secondary"
               style={{ fontSize: 12, padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
-              title="Download all customer inquiries to CSV"
+              title="Manually save a new lead"
             >
-              <span>📥 Export</span>
+              <span>➕ Add Lead</span>
+            </button>
+
+            <button
+              onClick={() => setShowExportModal(true)}
+              className="btn btn-primary"
+              style={{ fontSize: 12, padding: '7px 12px', display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}
+              title="Download or sync leads with Google Sheets / Excel"
+            >
+              <span>📊 Export Google Sheet</span>
             </button>
 
             <button
@@ -447,8 +511,24 @@ export default function ClientPortal() {
                 </select>
               </div>
 
-              <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
-                Showing <strong>{filteredLeads.length}</strong> inquiries
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>
+                  Showing <strong>{filteredLeads.length}</strong> inquiries
+                </span>
+                <button
+                  onClick={() => setShowAddLeadModal(true)}
+                  className="btn btn-secondary btn-sm"
+                  style={{ fontSize: 11.5, padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 5 }}
+                >
+                  ➕ Add Lead
+                </button>
+                <button
+                  onClick={() => setShowExportModal(true)}
+                  className="btn btn-primary btn-sm"
+                  style={{ fontSize: 11.5, padding: '5px 10px', display: 'flex', alignItems: 'center', gap: 5 }}
+                >
+                  📊 Export Sheet
+                </button>
               </div>
             </div>
 
@@ -1206,6 +1286,377 @@ export default function ClientPortal() {
             }}>
               👁️ Monitoring mode • AI is actively handling responses 24/7 on WhatsApp
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── MODAL: GOOGLE SHEETS & EXCEL EXPORT ── */}
+      {showExportModal && (
+        <div
+          className="portal-modal-wrapper"
+          onClick={e => e.target === e.currentTarget && setShowExportModal(false)}
+        >
+          <div className="portal-modal-container" style={{ maxWidth: 520 }}>
+            {/* Header */}
+            <div style={{
+              padding: '16px 20px',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              background: 'rgba(255,255,255,0.02)',
+            }}>
+              <div>
+                <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: '#fff', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>📊</span> Export Leads to Google Sheets / Excel
+                </h3>
+                <p style={{ fontSize: 11.5, color: 'var(--text-tertiary)', margin: '2px 0 0' }}>
+                  Filter and download customer inquiries customized to your preferences
+                </p>
+              </div>
+              <button
+                onClick={() => setShowExportModal(false)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  border: 'none',
+                  color: '#9ca3af',
+                  fontSize: 16,
+                  cursor: 'pointer',
+                  width: 30,
+                  height: 30,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {/* Status Filter */}
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                  1. Filter by Lead Status:
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(90px, 1fr))', gap: 8 }}>
+                  {[
+                    { id: 'all', label: 'All Leads' },
+                    { id: 'hot', label: '🔥 Hot' },
+                    { id: 'warm', label: '🟡 Warm' },
+                    { id: 'cold', label: '❄️ Cold' },
+                    { id: 'new', label: '🆕 New' },
+                  ].map(st => (
+                    <button
+                      key={st.id}
+                      type="button"
+                      onClick={() => setExportStatus(st.id)}
+                      style={{
+                        padding: '8px 10px',
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        borderRadius: 8,
+                        border: exportStatus === st.id ? '2px solid #818cf8' : '1px solid rgba(255,255,255,0.1)',
+                        background: exportStatus === st.id ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.04)',
+                        color: exportStatus === st.id ? '#fff' : 'var(--text-secondary)',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s'
+                      }}
+                    >
+                      {st.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Date Filter */}
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 6 }}>
+                  2. Filter by Date Range:
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8, marginBottom: 10 }}>
+                  {[
+                    { id: 'all', label: 'All Time' },
+                    { id: 'today', label: 'Today' },
+                    { id: 'yesterday', label: 'Yesterday' },
+                    { id: 'week', label: 'Last 7 Days' },
+                    { id: 'month', label: 'This Month' },
+                    { id: 'custom', label: '📅 Custom' },
+                  ].map(dp => (
+                    <button
+                      key={dp.id}
+                      type="button"
+                      onClick={() => setExportDatePreset(dp.id)}
+                      style={{
+                        padding: '7px 10px',
+                        fontSize: 11.5,
+                        fontWeight: 600,
+                        borderRadius: 8,
+                        border: exportDatePreset === dp.id ? '2px solid #10b981' : '1px solid rgba(255,255,255,0.1)',
+                        background: exportDatePreset === dp.id ? 'rgba(16,185,129,0.15)' : 'rgba(255,255,255,0.04)',
+                        color: exportDatePreset === dp.id ? '#fff' : 'var(--text-secondary)',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      {dp.label}
+                    </button>
+                  ))}
+                </div>
+
+                {exportDatePreset === 'custom' && (
+                  <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-tertiary)', display: 'block', marginBottom: 3 }}>From Date</span>
+                      <input
+                        type="date"
+                        className="form-input"
+                        value={exportStartDate}
+                        onChange={e => setExportStartDate(e.target.value)}
+                        style={{ fontSize: 12, padding: '6px 10px' }}
+                      />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <span style={{ fontSize: 10, color: 'var(--text-tertiary)', display: 'block', marginBottom: 3 }}>To Date</span>
+                      <input
+                        type="date"
+                        className="form-input"
+                        value={exportEndDate}
+                        onChange={e => setExportEndDate(e.target.value)}
+                        style={{ fontSize: 12, padding: '6px 10px' }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Action 1: Direct Download */}
+              <div style={{
+                background: 'rgba(255,255,255,0.03)',
+                padding: '14px',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.08)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: '#fff' }}>Option A: Direct Download</span>
+                  <span style={{ fontSize: 10, background: 'rgba(16,185,129,0.2)', color: '#10b981', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>
+                    Google Sheets / Excel CSV
+                  </span>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 12, lineHeight: 1.4 }}>
+                  Includes Name, Phone, Status, Score, Customer Need Summary, Next Best Action, and Message History.
+                </p>
+                <button
+                  type="button"
+                  onClick={triggerLeadsExport}
+                  className="btn btn-primary"
+                  style={{ width: '100%', padding: '10px 14px', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}
+                >
+                  <span>📥 Download CSV File</span>
+                </button>
+              </div>
+
+              {/* Action 2: Live Google Sheets Sync Formula */}
+              <div style={{
+                background: 'rgba(99,102,241,0.06)',
+                padding: '14px',
+                borderRadius: 10,
+                border: '1px solid rgba(99,102,241,0.2)'
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: '#818cf8' }}>Option B: Live Google Sheets Formula</span>
+                  <span style={{ fontSize: 10, background: 'rgba(99,102,241,0.2)', color: '#818cf8', padding: '2px 8px', borderRadius: 10, fontWeight: 700 }}>
+                    Auto-Updating
+                  </span>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginBottom: 10, lineHeight: 1.4 }}>
+                  Paste this formula in cell <strong>A1</strong> of a Google Sheet. It will automatically keep all your leads synced in real time!
+                </p>
+
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  background: 'rgba(0,0,0,0.3)',
+                  padding: '8px 10px',
+                  borderRadius: 6,
+                  border: '1px solid rgba(255,255,255,0.08)'
+                }}>
+                  <input
+                    type="text"
+                    readOnly
+                    value={getGoogleSheetsFormula()}
+                    style={{
+                      flex: 1,
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#6ee7b7',
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                      outline: 'none',
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(getGoogleSheetsFormula());
+                      setCopiedFormula(true);
+                      setTimeout(() => setCopiedFormula(false), 2500);
+                      showToast('Google Sheets formula copied!', 'success');
+                    }}
+                    className="btn btn-secondary btn-sm"
+                    style={{ fontSize: 11, padding: '4px 10px', flexShrink: 0 }}
+                  >
+                    {copiedFormula ? '✓ Copied' : '📋 Copy'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── MODAL: ADD NEW LEAD MANUALLY ── */}
+      {showAddLeadModal && (
+        <div
+          className="portal-modal-wrapper"
+          onClick={e => e.target === e.currentTarget && setShowAddLeadModal(false)}
+        >
+          <div className="portal-modal-container" style={{ maxWidth: 460 }}>
+            {/* Header */}
+            <div style={{
+              padding: '16px 20px',
+              borderBottom: '1px solid rgba(255,255,255,0.08)',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              background: 'rgba(255,255,255,0.02)',
+            }}>
+              <div>
+                <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: '#fff', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>➕</span> Add Customer Lead
+                </h3>
+                <p style={{ fontSize: 11.5, color: 'var(--text-tertiary)', margin: '2px 0 0' }}>
+                  Save a walk-in, phone call, or referral contact to your portal
+                </p>
+              </div>
+              <button
+                onClick={() => setShowAddLeadModal(false)}
+                style={{
+                  background: 'rgba(255,255,255,0.08)',
+                  border: 'none',
+                  color: '#9ca3af',
+                  fontSize: 16,
+                  cursor: 'pointer',
+                  width: 30,
+                  height: 30,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Form */}
+            <form onSubmit={handleSaveNewLead} style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 }}>
+                  Customer Phone Number *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. +91 98765 43210"
+                  className="form-input"
+                  value={newLeadForm.phone_number}
+                  onChange={e => setNewLeadForm({ ...newLeadForm, phone_number: e.target.value })}
+                  style={{ fontSize: 13 }}
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 }}>
+                  Customer Full Name
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Rahul Sharma"
+                  className="form-input"
+                  value={newLeadForm.name}
+                  onChange={e => setNewLeadForm({ ...newLeadForm, name: e.target.value })}
+                  style={{ fontSize: 13 }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 }}>
+                  Lead Intent Status
+                </label>
+                <select
+                  className="form-select"
+                  value={newLeadForm.lead_status}
+                  onChange={e => setNewLeadForm({ ...newLeadForm, lead_status: e.target.value })}
+                  style={{ fontSize: 13 }}
+                >
+                  <option value="hot">🔥 Hot Lead (Ready to buy/visit)</option>
+                  <option value="warm">🟡 Warm Lead (Interested/Comparing)</option>
+                  <option value="cold">❄️ Cold Lead (Just browsing)</option>
+                  <option value="new">🆕 New Lead</option>
+                </select>
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 }}>
+                  Customer Need / Requirement Note
+                </label>
+                <textarea
+                  placeholder="What does the customer need? e.g. Wants consultation for dental implant"
+                  className="form-textarea"
+                  rows={2}
+                  value={newLeadForm.summary}
+                  onChange={e => setNewLeadForm({ ...newLeadForm, summary: e.target.value })}
+                  style={{ fontSize: 12.5 }}
+                />
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: 5 }}>
+                  Next Best Action for Staff
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. Call back on Friday at 4 PM"
+                  className="form-input"
+                  value={newLeadForm.suggested_action}
+                  onChange={e => setNewLeadForm({ ...newLeadForm, suggested_action: e.target.value })}
+                  style={{ fontSize: 12.5 }}
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 10, marginTop: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowAddLeadModal(false)}
+                  className="btn btn-secondary"
+                  style={{ flex: 1, padding: '10px' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingLead}
+                  className="btn btn-primary"
+                  style={{ flex: 2, padding: '10px' }}
+                >
+                  {savingLead ? 'Saving...' : '💾 Save Customer Lead'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
