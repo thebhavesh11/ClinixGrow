@@ -380,3 +380,17 @@ async def export_portal_leads_csv(
         }
     )
 
+
+@router.get("/{token}/date-stats")
+async def get_portal_date_stats(
+    token: str,
+    date: Optional[str] = Query(None, description="Date in YYYY-MM-DD format"),
+    tz_offset: int = Query(330, description="Timezone offset in minutes (default 330 for IST)"),
+    x_portal_pin: Optional[str] = Header(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """Returns date-specific WhatsApp message, inquiry, and contact analytics for client portal."""
+    from routers.dashboard import calculate_date_analytics
+    biz = await _get_portal_business(token, db, pin=x_portal_pin)
+    return await calculate_date_analytics(bid=biz.id, target_date_str=date, tz_offset=tz_offset, db=db)
+

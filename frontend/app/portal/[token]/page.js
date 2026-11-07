@@ -17,12 +17,17 @@ export default function ClientPortal() {
   const [clientInfo, setClientInfo] = useState(null);
 
   // Portal Data states
-  const [activeTab, setActiveTab] = useState('leads'); // 'leads' | 'chat' | 'appointments' | 'trends'
+  const [activeTab, setActiveTab] = useState('leads'); // 'leads' | 'messages' | 'appointments' | 'trends'
   const [overview, setOverview] = useState(null);
   const [leads, setLeads] = useState([]);
   const [appointments, setAppointments] = useState([]);
   const [searchLead, setSearchLead] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
+
+  // Date-wise Message Analytics states
+  const [selectedDate, setSelectedDate] = useState('');
+  const [dateStats, setDateStats] = useState(null);
+  const [loadingDateStats, setLoadingDateStats] = useState(false);
 
   // Chat Viewer state
   const [selectedLead, setSelectedLead] = useState(null);
@@ -116,6 +121,23 @@ export default function ClientPortal() {
     if (ov) setOverview(ov);
     if (Array.isArray(ld)) setLeads(ld);
     if (Array.isArray(ap)) setAppointments(ap);
+
+    loadDateStats(selectedDate, currentPin);
+  }
+
+  async function loadDateStats(targetDate = '', currentPin = pin) {
+    if (!token) return;
+    setLoadingDateStats(true);
+    const headers = {};
+    if (currentPin) headers['X-Portal-PIN'] = currentPin;
+    const tz = -new Date().getTimezoneOffset();
+    const query = targetDate ? `&date=${encodeURIComponent(targetDate)}` : '';
+    const [data] = await safeFetch(`${API}/portal/${token}/date-stats?tz_offset=${tz}${query}`, { headers });
+    setLoadingDateStats(false);
+    if (data) {
+      setDateStats(data);
+      if (data.date && !targetDate) setSelectedDate(data.date);
+    }
   }
 
   // Polling every 15s when authenticated
@@ -376,6 +398,7 @@ export default function ClientPortal() {
         <div className="portal-tabs-nav">
           {[
             { id: 'leads', label: `👥 Leads (${leads.length})` },
+            { id: 'messages', label: `📅 Daily Messages & Activity` },
             { id: 'appointments', label: `📅 Appointments (${appointments.length})` },
             { id: 'trends', label: '📊 7-Day Performance' },
           ].map(tab => (
@@ -570,7 +593,313 @@ export default function ClientPortal() {
         )}
 
         {/* ═══════════════════════════════════════════════════════════
-            TAB 2: BOOKED APPOINTMENTS
+            TAB 2: DAILY MESSAGES & ACTIVITY INSPECTOR
+            ═══════════════════════════════════════════════════════════ */}
+        {activeTab === 'messages' && (
+          <div className="card" style={{ padding: 20 }}>
+            {/* Header & Controls */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 14, marginBottom: 20 }}>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 20 }}>📅</span>
+                  <h3 style={{ fontSize: 16, fontWeight: 700, margin: 0, color: '#fff' }}>
+                    WhatsApp Daily Activity & Message Inspector
+                  </h3>
+                  {dateStats?.display_label && (
+                    <span style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      padding: '3px 10px',
+                      borderRadius: 12,
+                      background: dateStats.is_today ? 'rgba(16,185,129,0.15)' : dateStats.is_yesterday ? 'rgba(59,130,246,0.15)' : 'rgba(255,255,255,0.08)',
+                      color: dateStats.is_today ? 'var(--accent)' : dateStats.is_yesterday ? '#60a5fa' : 'var(--text-secondary)',
+                      border: `1px solid ${dateStats.is_today ? 'rgba(16,185,129,0.3)' : 'rgba(255,255,255,0.1)'}`
+                    }}>
+                      {dateStats.display_label}
+                    </span>
+                  )}
+                </div>
+                <p style={{ fontSize: 12, color: 'var(--text-tertiary)', marginTop: 4 }}>
+                  Select any date to see incoming customer inquiries, AI vs manual replies, and new numbers vs saved contacts.
+                </p>
+              </div>
+
+              {/* Quick Presets & Calendar Date Input */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                {dateStats?.presets?.today_date && (
+                  <button
+                    onClick={() => {
+                      setSelectedDate(dateStats.presets.today_date);
+                      loadDateStats(dateStats.presets.today_date);
+                    }}
+                    className={`btn btn-sm ${selectedDate === dateStats.presets.today_date ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 11.5, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    <span>Today</span>
+                    <span style={{
+                      background: selectedDate === dateStats.presets.today_date ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)',
+                      padding: '1px 6px',
+                      borderRadius: 10,
+                      fontSize: 10,
+                      fontWeight: 700
+                    }}>
+                      {dateStats.presets.today_messages || 0}
+                    </span>
+                  </button>
+                )}
+
+                {dateStats?.presets?.yesterday_date && (
+                  <button
+                    onClick={() => {
+                      setSelectedDate(dateStats.presets.yesterday_date);
+                      loadDateStats(dateStats.presets.yesterday_date);
+                    }}
+                    className={`btn btn-sm ${selectedDate === dateStats.presets.yesterday_date ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ fontSize: 11.5, padding: '6px 12px', display: 'flex', alignItems: 'center', gap: 6 }}
+                  >
+                    <span>Yesterday</span>
+                    <span style={{
+                      background: selectedDate === dateStats.presets.yesterday_date ? 'rgba(0,0,0,0.2)' : 'rgba(255,255,255,0.1)',
+                      padding: '1px 6px',
+                      borderRadius: 10,
+                      fontSize: 10,
+                      fontWeight: 700
+                    }}>
+                      {dateStats.presets.yesterday_messages || 0}
+                    </span>
+                  </button>
+                )}
+
+                <input
+                  type="date"
+                  className="form-input"
+                  value={selectedDate}
+                  onChange={e => {
+                    setSelectedDate(e.target.value);
+                    loadDateStats(e.target.value);
+                  }}
+                  style={{
+                    fontSize: 12,
+                    padding: '6px 12px',
+                    background: 'var(--bg-primary)',
+                    borderColor: 'rgba(99,102,241,0.3)',
+                    color: 'var(--text-primary)',
+                    cursor: 'pointer'
+                  }}
+                />
+
+                <button
+                  onClick={() => loadDateStats(selectedDate)}
+                  className="btn btn-secondary btn-sm"
+                  style={{ fontSize: 13, padding: '6px 10px' }}
+                  title="Refresh date analytics"
+                >
+                  {loadingDateStats ? '⏳' : '↻'}
+                </button>
+              </div>
+            </div>
+
+            {/* 6 Metric Cards */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+              gap: 12,
+              marginBottom: 20
+            }}>
+              <div style={{ padding: '14px 16px', background: 'rgba(99,102,241,0.08)', borderRadius: 10, border: '1px solid rgba(99,102,241,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#a5b4fc', fontWeight: 600, textTransform: 'uppercase' }}>Total Messages</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#fff', marginTop: 4 }}>
+                  {dateStats?.summary?.total_messages || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                  {dateStats?.summary?.active_conversations || 0} active chats
+                </div>
+              </div>
+
+              <div style={{ padding: '14px 16px', background: 'rgba(16,185,129,0.08)', borderRadius: 10, border: '1px solid rgba(16,185,129,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#6ee7b7', fontWeight: 600, textTransform: 'uppercase' }}>📥 Inbound Inquiries</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#10b981', marginTop: 4 }}>
+                  {dateStats?.summary?.incoming_messages || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>From customers</div>
+              </div>
+
+              <div style={{ padding: '14px 16px', background: 'rgba(59,130,246,0.08)', borderRadius: 10, border: '1px solid rgba(59,130,246,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#93c5fd', fontWeight: 600, textTransform: 'uppercase' }}>🤖 AI Automated</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#3b82f6', marginTop: 4 }}>
+                  {dateStats?.summary?.ai_replies || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>24/7 instant replies</div>
+              </div>
+
+              <div style={{ padding: '14px 16px', background: 'rgba(245,158,11,0.08)', borderRadius: 10, border: '1px solid rgba(245,158,11,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#fcd34d', fontWeight: 600, textTransform: 'uppercase' }}>👤 Manual Replies</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#f59e0b', marginTop: 4 }}>
+                  {dateStats?.summary?.human_replies || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>Sent by staff</div>
+              </div>
+
+              <div style={{ padding: '14px 16px', background: 'rgba(236,72,153,0.08)', borderRadius: 10, border: '1px solid rgba(236,72,153,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#f472b6', fontWeight: 600, textTransform: 'uppercase' }}>🆕 New Numbers</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#ec4899', marginTop: 4 }}>
+                  {dateStats?.summary?.new_numbers || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>New customer leads</div>
+              </div>
+
+              <div style={{ padding: '14px 16px', background: 'rgba(168,85,247,0.08)', borderRadius: 10, border: '1px solid rgba(168,85,247,0.2)' }}>
+                <div style={{ fontSize: 11, color: '#c084fc', fontWeight: 600, textTransform: 'uppercase' }}>📇 Saved Contacts</div>
+                <div style={{ fontSize: 26, fontWeight: 800, color: '#a855f7', marginTop: 4 }}>
+                  {dateStats?.summary?.saved_contacts || 0}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>In address book</div>
+              </div>
+            </div>
+
+            {/* Split: Contact List & Daily Insights */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 280px', gap: 16 }}>
+              {/* Active Contacts */}
+              <div style={{
+                background: 'rgba(255,255,255,0.02)',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.08)',
+                overflow: 'hidden'
+              }}>
+                <div style={{
+                  padding: '12px 16px',
+                  borderBottom: '1px solid rgba(255,255,255,0.08)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <span style={{ fontSize: 13, fontWeight: 700, color: '#fff' }}>
+                    Active Contacts ({dateStats?.contacts?.length || 0})
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                    Ranked by chat activity
+                  </span>
+                </div>
+
+                {loadingDateStats ? (
+                  <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                    <div className="spinner" style={{ margin: '0 auto 10px' }}></div>
+                    Loading messages...
+                  </div>
+                ) : (dateStats?.contacts?.length || 0) > 0 ? (
+                  <div style={{ maxHeight: 350, overflowY: 'auto' }}>
+                    {dateStats.contacts.map(c => (
+                      <div
+                        key={c.lead_id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          padding: '12px 16px',
+                          borderBottom: '1px solid rgba(255,255,255,0.05)',
+                          gap: 12
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+                            <span style={{ fontWeight: 600, fontSize: 13.5, color: '#fff' }}>{c.name}</span>
+                            {c.is_new ? (
+                              <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: 'rgba(236,72,153,0.15)', color: '#f472b6', fontWeight: 700 }}>
+                                🆕 NEW
+                              </span>
+                            ) : c.is_saved_name ? (
+                              <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 8, background: 'rgba(168,85,247,0.15)', color: '#c084fc', fontWeight: 700 }}>
+                                📇 SAVED
+                              </span>
+                            ) : null}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
+                            📱 {c.phone_number} • {c.messages_count} messages
+                          </div>
+                          {c.last_message && (
+                            <div style={{
+                              fontSize: 11.5,
+                              color: 'var(--text-secondary)',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              marginTop: 2
+                            }}>
+                              💬 {c.last_message}
+                            </div>
+                          )}
+                        </div>
+
+                        <button
+                          onClick={() => openLeadChat({ id: c.lead_id, name: c.name, phone_number: c.phone_number, lead_status: c.lead_status, lead_score: c.lead_score })}
+                          className="btn btn-secondary btn-sm"
+                          style={{ fontSize: 11, padding: '5px 12px', flexShrink: 0 }}
+                        >
+                          👁️ View Chat
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div style={{ padding: '36px 20px', textAlign: 'center', color: 'var(--text-tertiary)' }}>
+                    <div style={{ fontSize: 30, marginBottom: 8 }}>📭</div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-secondary)' }}>
+                      No messages recorded on {dateStats?.display_label || 'this date'}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Insights Box */}
+              <div style={{
+                background: 'rgba(255,255,255,0.02)',
+                borderRadius: 10,
+                border: '1px solid rgba(255,255,255,0.08)',
+                padding: 16,
+                display: 'flex',
+                flexDirection: 'column',
+                justifyContent: 'space-between',
+                gap: 12
+              }}>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text-tertiary)', textTransform: 'uppercase', marginBottom: 12 }}>
+                    🎯 Outcomes on this Date
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Appointments Booked</span>
+                      <span style={{ fontWeight: 700, color: '#10b981' }}>{dateStats?.summary?.appointments_count || 0}</span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>AI Automation Ratio</span>
+                      <span style={{ fontWeight: 700, color: '#3b82f6' }}>
+                        {dateStats?.summary?.incoming_messages > 0 ? Math.round((dateStats.summary.ai_replies / dateStats.summary.incoming_messages) * 100) : 100}%
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12.5 }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>Returning Customers</span>
+                      <span style={{ fontWeight: 700, color: '#fff' }}>{dateStats?.summary?.returning_contacts || 0}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div style={{
+                  padding: 12,
+                  background: 'rgba(99,102,241,0.08)',
+                  borderRadius: 8,
+                  fontSize: 11,
+                  color: '#818cf8',
+                  lineHeight: 1.5
+                }}>
+                  ✨ <strong>Automation Active:</strong> Every customer message is handled instantly with zero delay, booking appointments directly into your calendar.
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══════════════════════════════════════════════════════════
+            TAB 3: BOOKED APPOINTMENTS
             ═══════════════════════════════════════════════════════════ */}
         {activeTab === 'appointments' && (
           <div className="card" style={{ padding: 18 }}>
