@@ -250,6 +250,8 @@ async def get_portal_leads(
             "phone_number": l.phone_number,
             "lead_score": l.lead_score or 0,
             "lead_status": l.lead_status or "new",
+            "summary": getattr(l, "summary", "") or "",
+            "suggested_action": getattr(l, "suggested_action", "") or "",
             "created_at": l.created_at.isoformat() if l.created_at else None,
             "last_message": last_msg.message_text if last_msg else "",
             "last_sender": last_msg.sender_type if last_msg else None,

@@ -568,6 +568,19 @@ export default function ClientPortal() {
                       💬 &ldquo;{l.last_message || 'Inquiry started'}&rdquo;
                     </div>
 
+                    {l.summary && (
+                      <div style={{ fontSize: 11.5, color: '#93c5fd', marginTop: 6, display: 'flex', alignItems: 'flex-start', gap: 6, lineHeight: 1.4 }}>
+                        <span style={{ flexShrink: 0 }}>📝</span>
+                        <span><strong>Need:</strong> {l.summary}</span>
+                      </div>
+                    )}
+                    {l.suggested_action && (
+                      <div style={{ fontSize: 11, color: '#fcd34d', marginTop: 4, display: 'flex', alignItems: 'flex-start', gap: 6, lineHeight: 1.4 }}>
+                        <span style={{ flexShrink: 0 }}>🎯</span>
+                        <span><strong>Next Step:</strong> {l.suggested_action}</span>
+                      </div>
+                    )}
+
                     <div className="portal-lead-card-footer">
                       <span style={{ fontSize: 11, color: '#10b981', display: 'flex', alignItems: 'center', gap: 4 }}>
                         <span>⚡</span> AI Handled
@@ -816,7 +829,11 @@ export default function ClientPortal() {
                           <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>
                             📱 {c.phone_number} • {c.messages_count} messages
                           </div>
-                          {c.last_message && (
+                          {c.summary ? (
+                            <div style={{ fontSize: 11.5, color: '#93c5fd', marginTop: 3 }}>
+                              📝 {c.summary}
+                            </div>
+                          ) : c.last_message ? (
                             <div style={{
                               fontSize: 11.5,
                               color: 'var(--text-secondary)',
@@ -826,6 +843,12 @@ export default function ClientPortal() {
                               marginTop: 2
                             }}>
                               💬 {c.last_message}
+                            </div>
+                          ) : null}
+
+                          {c.suggested_action && (
+                            <div style={{ fontSize: 10.5, color: '#fcd34d', marginTop: 2 }}>
+                              🎯 {c.suggested_action}
                             </div>
                           )}
                         </div>

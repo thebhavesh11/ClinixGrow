@@ -757,30 +757,94 @@ async def generate_ai_reply(ai_settings, business, history, current_message, med
 
 
 async def score_lead(lead, ai_settings, history, db):
-    """Score a lead based on conversation history."""
+    """Universal & Dynamic Lead Qualification Engine (4-Factor Buyer Intent Framework)."""
     if not ai_settings or not ai_settings.api_key:
         return
+
+    # 1. Rule 1: First Interaction Grace Rule (Prevent marking single "Hi/Hello" as Cold)
+    customer_msgs = [m for m in history if m.sender_type == "customer"]
+    if len(customer_msgs) == 1:
+        first_text = (customer_msgs[0].message_text or "").strip().lower()
+        greetings = {"hi", "hello", "hey", "namaste", "pranam", "hlo", "hii", "hiii", "good morning", "good evening", "good afternoon", "start", "hy", "hola", "yo"}
+        if first_text in greetings or (len(first_text) <= 4 and "?" not in first_text and not any(c.isdigit() for c in first_text)):
+            lead.lead_score = max(lead.lead_score or 0, 35)
+            if not lead.lead_status or lead.lead_status == "cold":
+                lead.lead_status = "new"
+            lead.summary = "Just initiated conversation / greeting"
+            lead.suggested_action = "Awaiting customer requirements"
+            await db.flush()
+            logger.info(f"[Engine] Lead {lead.phone_number} kept as 'new' (initial greeting grace)")
+            return
+
+    # 2. Rule 2: Check for Confirmed Appointment (Guaranteed HOT Lead)
+    has_confirmed_appt = False
+    try:
+        appt_res = await db.execute(
+            select(Appointment).where(
+                Appointment.lead_id == lead.id,
+                Appointment.status == "confirmed"
+            )
+        )
+        has_confirmed_appt = appt_res.scalars().first() is not None
+    except Exception as appt_check_err:
+        logger.warning(f"[Engine] Appointment check warning in scoring: {appt_check_err}")
+
+    # 3. Dynamic Business Profile Injection
+    biz_res = await db.execute(select(Business).where(Business.id == lead.business_id))
+    business = biz_res.scalar_one_or_none()
+    biz_name = (business.name or "Business").strip() if business else "Business"
+    biz_industry = (business.industry or "").strip() if business else ""
+    biz_services = (business.services or "").strip() if business else ""
+    biz_location = (business.location or "").strip() if business else ""
+
+    context_header = f"Business: '{biz_name}'"
+    if biz_industry:
+        context_header += f" | Industry: {biz_industry}"
+    if biz_location:
+        context_header += f" | Location: {biz_location}"
+    if biz_services:
+        context_header += f"\nKey Offerings / Services: {biz_services[:300]}"
 
     conversation_text = "\n".join(
         [f"{'Customer' if m.sender_type == 'customer' else 'AI'}: {m.message_text}" for m in history]
     )
 
-    # Use the custom scoring prompt from settings, or fall back to default
+    # Use custom scoring prompt if defined in AI settings, otherwise Universal 4-Factor Framework
     custom_scoring = ai_settings.scoring_prompt.strip() if ai_settings.scoring_prompt else ""
 
     if custom_scoring:
         scoring_prompt = f"""{custom_scoring}
 
-Return ONLY a JSON object: {{"score": number, "label": "hot|warm|cold"}}
+Business Context:
+{context_header}
+
+Return ONLY a valid JSON object with NO extra text or markdown formatting:
+{{"score": number (0-100), "label": "hot|warm|cold", "summary": "1 sentence describing customer need", "suggested_action": "1 concrete next step for staff"}}
 
 Conversation:
 {conversation_text}"""
     else:
-        scoring_prompt = f"""Analyze this conversation and score the lead from 0-100.
-Return ONLY a JSON object: {{"score": number, "label": "hot|warm|cold"}}
-- HOT (80-100): Ready to buy/visit, has budget clarity, urgency
-- WARM (50-79): Interested but needs nurturing, comparing options
-- COLD (0-49): Just browsing, no budget mentioned, vague interest
+        scoring_prompt = f"""You are an elite sales qualification specialist analyzing a customer conversation for:
+{context_header}
+
+Evaluate buyer intent using the Universal 4-Factor Intent Framework:
+1. Specific Need: Did the customer ask for a specific service, product, package, or solution?
+2. Action & Visit Intent: Did they ask for an appointment, site visit, demo, consultation, timing, or booking?
+3. Urgency & Timeline: Are they looking for an immediate / this week / clear timeline vs vague future?
+4. Commercial Alignment: Are they receptive to pricing, asking payment methods, or ready to proceed?
+
+Classification Standards:
+- HOT (Score 80-100): High intent! Explicitly asked to book, visit, buy, agreed on pricing, has urgent timeline, or booked appointment.
+- WARM (Score 50-79): Moderate intent. Comparing options, asked about pricing/services, but has not finalized date/slot yet.
+- COLD (Score 0-49): Low intent. Casual browsing, vague answers, out-of-budget, or drop-off.
+
+Return ONLY a valid JSON object with NO markdown or code blocks:
+{{
+  "score": <integer from 0 to 100>,
+  "label": "hot" | "warm" | "cold",
+  "summary": "<one crisp sentence describing what this customer wants / their specific inquiry>",
+  "suggested_action": "<one actionable step for staff to close or follow up this lead>"
+}}
 
 Conversation:
 {conversation_text}"""
@@ -788,7 +852,7 @@ Conversation:
     try:
         provider = ai_settings.provider.lower()
 
-        # Model fallback (same as generate_ai_reply)
+        # Model fallback
         model = (ai_settings.model or "").strip()
         if not model:
             model_defaults = {
@@ -798,6 +862,7 @@ Conversation:
             }
             model = model_defaults.get(provider, "gpt-4o-mini")
 
+        text = ""
         if provider in ("openai", "openrouter"):
             from openai import AsyncOpenAI
             base_url = "https://openrouter.ai/api/v1" if provider == "openrouter" else None
@@ -806,7 +871,7 @@ Conversation:
                 model=model,
                 messages=[{"role": "user", "content": scoring_prompt}],
                 temperature=0.3,
-                max_tokens=100,
+                max_tokens=220,
             )
             text = response.choices[0].message.content.strip()
 
@@ -817,7 +882,7 @@ Conversation:
                 model=model,
                 messages=[{"role": "user", "content": scoring_prompt}],
                 temperature=0.3,
-                max_tokens=100,
+                max_tokens=220,
             )
             text = response.content[0].text.strip()
 
@@ -825,7 +890,6 @@ Conversation:
             import google.generativeai as genai
             genai.configure(api_key=ai_settings.api_key)
             gmodel = genai.GenerativeModel(model)
-            # Run blocking Gemini call in thread to avoid blocking event loop
             response = await asyncio.to_thread(gmodel.generate_content, scoring_prompt)
             text = response.text.strip()
 
@@ -834,11 +898,30 @@ Conversation:
 
         # Parse JSON score
         if "{" in text:
-            data = json.loads(text[text.index("{"):text.rindex("}") + 1])
-            lead.lead_score = data.get("score", lead.lead_score)
-            lead.lead_status = data.get("label", lead.lead_status)
+            raw_json = text[text.index("{"):text.rindex("}") + 1]
+            data = json.loads(raw_json)
+
+            score = int(data.get("score", lead.lead_score or 50))
+            label = str(data.get("label", lead.lead_status or "warm")).lower()
+            summary = str(data.get("summary", "")).strip()[:250]
+            action = str(data.get("suggested_action", "")).strip()[:200]
+
+            # Guaranteed appointment booster
+            if has_confirmed_appt:
+                score = max(score, 95)
+                label = "hot"
+                if not action or action.lower() in ("none", "null"):
+                    action = "Appointment confirmed. Prepare for customer visit/call."
+
+            lead.lead_score = max(0, min(100, score))
+            lead.lead_status = label if label in ("hot", "warm", "cold", "spam", "handover") else "warm"
+            if summary:
+                lead.summary = summary
+            if action:
+                lead.suggested_action = action
+
             await db.flush()
-            logger.info(f"[Engine] Lead scored: {lead.lead_score} ({lead.lead_status})")
+            logger.info(f"[Engine] Lead scored for biz {lead.business_id}: {lead.lead_score} ({lead.lead_status}) — Need: {lead.summary[:50]}")
 
     except Exception as e:
         logger.error(f"[Engine] Scoring error: {type(e).__name__}: {e}")

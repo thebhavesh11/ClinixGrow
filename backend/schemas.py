@@ -118,6 +118,8 @@ class LeadResponse(BaseModel):
     business_id: int
     lead_score: int
     lead_status: str
+    summary: Optional[str] = ""
+    suggested_action: Optional[str] = ""
     created_at: datetime
 
     class Config:

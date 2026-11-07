@@ -39,7 +39,9 @@ class Lead(Base):
     name = Column(String(255), default="Unknown")
     business_id = Column(Integer, ForeignKey("businesses.id"), default=1)
     lead_score = Column(Integer, default=0)
-    lead_status = Column(String(20), default="new")  # new, hot, warm, cold, spam
+    lead_status = Column(String(20), default="new")  # new, hot, warm, cold, spam, handover
+    summary = Column(Text, default="")
+    suggested_action = Column(String(255), default="")
     created_at = Column(DateTime, default=lambda: datetime.utcnow())
 
     business = relationship("Business", back_populates="leads")

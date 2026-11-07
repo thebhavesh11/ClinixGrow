@@ -63,6 +63,8 @@ async def lifespan(app: FastAPI):
                         ("business_id", "INTEGER DEFAULT 1"),
                         ("lead_score", "INTEGER DEFAULT 0"),
                         ("lead_status", "VARCHAR(20) DEFAULT 'new'"),
+                        ("summary", "TEXT DEFAULT ''"),
+                        ("suggested_action", "VARCHAR(255) DEFAULT ''"),
                     ],
                     "conversations": [
                         ("business_id", "INTEGER DEFAULT 1"),

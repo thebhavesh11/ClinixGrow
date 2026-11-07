@@ -237,6 +237,8 @@ async def calculate_date_analytics(bid: int, target_date_str: Optional[str], tz_
                     "messages_count": lead_msg_counts.get(l.id, 0),
                     "lead_status": l.lead_status or "new",
                     "lead_score": l.lead_score or 0,
+                    "summary": getattr(l, "summary", "") or "",
+                    "suggested_action": getattr(l, "suggested_action", "") or "",
                     "last_message": lead_last_msg.get(l.id, ""),
                     "last_time": lead_last_time.get(l.id, ""),
                 })

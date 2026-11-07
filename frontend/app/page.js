@@ -437,19 +437,30 @@ export default function Dashboard() {
                             {c.messages_count}
                           </span>
                         </td>
-                        <td style={{ maxWidth: 220 }}>
-                          <div style={{
-                            fontSize: 12,
-                            color: 'var(--text-secondary)',
-                            whiteSpace: 'nowrap',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis'
-                          }}>
-                            {c.last_message || '—'}
-                          </div>
+                        <td style={{ maxWidth: 260 }}>
+                          {c.summary ? (
+                            <div style={{ fontSize: 11.5, color: '#93c5fd', fontWeight: 600, marginBottom: 2 }}>
+                              📝 {c.summary}
+                            </div>
+                          ) : (
+                            <div style={{
+                              fontSize: 12,
+                              color: 'var(--text-secondary)',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis'
+                            }}>
+                              {c.last_message || '—'}
+                            </div>
+                          )}
+                          {c.suggested_action && (
+                            <div style={{ fontSize: 10.5, color: '#fcd34d', fontWeight: 500, marginTop: 2 }}>
+                              🎯 {c.suggested_action}
+                            </div>
+                          )}
                           {c.last_time && (
                             <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 2 }}>
-                              {c.last_time}
+                              🕒 {c.last_time}
                             </div>
                           )}
                         </td>
@@ -568,6 +579,11 @@ export default function Dashboard() {
                     <td>
                       <div style={{ fontWeight: 600 }}>{l.name}</div>
                       <div style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>{l.phone_number}</div>
+                      {l.summary && (
+                        <div style={{ fontSize: 11, color: '#93c5fd', marginTop: 3, maxWidth: 280, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                          📝 {l.summary}
+                        </div>
+                      )}
                     </td>
                     <td>
                       <div className="score-display">
