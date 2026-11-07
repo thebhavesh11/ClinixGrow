@@ -1056,8 +1056,23 @@ app.post('/typing', async (req, res) => {
 
     try {
         let chatId = phone.includes('@') ? phone : `${phone.replace(/\D/g, '')}@c.us`;
-        const chat = await session.client.getChatById(chatId);
-        await chat.sendStateTyping();
+        let chat;
+        try {
+            chat = await session.client.getChatById(chatId);
+        } catch (_) {
+            if (chatId.includes('@lid')) {
+                try {
+                    chat = await session.client.getChatById(chatId.replace(/@lid$/, '@c.us'));
+                } catch (__) {}
+            }
+        }
+        if (chat) {
+            try { await chat.sendSeen(); } catch (_) {}
+            if (chat.sendStateTyping) {
+                await chat.sendStateTyping();
+            }
+            console.log(`[Bridge-Biz-${bid}] Sent state typing to ${chatId}`);
+        }
         res.json({ success: true });
     } catch (err) {
         console.error(`[Bridge-Biz-${bid}] Typing error:`, err.message);

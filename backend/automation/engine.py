@@ -35,6 +35,16 @@ def _get_phone_lock(phone: str) -> asyncio.Lock:
     return _phone_locks[phone]
 
 
+async def _send_typing_to_bridge(target_id: str, business_id: int):
+    """Trigger WhatsApp live typing state ('typing...') in the bridge."""
+    try:
+        async with httpx.AsyncClient(timeout=4) as client:
+            await client.post(f"{BRIDGE_URL}/typing", json={"phone": target_id, "business_id": business_id})
+            logger.info(f"[Engine] Triggered live typing indicator for {target_id} (biz={business_id})")
+    except Exception as e:
+        logger.debug(f"[Engine] Typing request error: {e}")
+
+
 async def process_incoming_message(
     phone: str, message: str, name: str, business_id: int, db: AsyncSession, reply_to: str = None, should_reply: bool = True, alt_phone: str = None
 ) -> dict:
@@ -136,6 +146,17 @@ async def _process_message_inner(
         .limit(10)
     )
     history = list(reversed(result.scalars().all()))
+
+    # Trigger live typing indicator immediately so customer sees "typing..." while AI generates reply!
+    wa_mode = getattr(ai_settings, 'wa_connection_mode', 'qr') or 'qr'
+    show_typing = bool(getattr(ai_settings, 'typing_indicator', 0))
+    target_id = reply_to if reply_to else phone
+
+    if show_typing and wa_mode == "qr":
+        try:
+            asyncio.create_task(_send_typing_to_bridge(target_id, business_id))
+        except Exception as te:
+            logger.debug(f"[Engine] Immediate typing trigger error: {te}")
 
     # 6. Generate AI reply
     # 6a. Build appointment context for AI

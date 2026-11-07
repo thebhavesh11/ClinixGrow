@@ -1093,6 +1093,40 @@ export default function WhatsApp() {
                   </div>
                 </div>
 
+                {/* Live Typing Indicator */}
+                <div className="card">
+                  <div className="card-header">Live WhatsApp Typing Indicator</div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 0' }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>Show "typing..." in WhatsApp</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 2 }}>
+                        Customer sees animated "typing..." status in WhatsApp while bot prepares replies
+                      </div>
+                    </div>
+                    <div
+                      onClick={async () => {
+                        const nextVal = aiSettings?.typing_indicator ? 0 : 1;
+                        const ok = await updateAISetting({ typing_indicator: nextVal });
+                        if (ok) showToast(nextVal ? 'Typing Indicator ON' : 'Typing Indicator OFF', 'success');
+                      }}
+                      style={{
+                        width: 44, height: 24, borderRadius: 12,
+                        background: aiSettings?.typing_indicator ? 'var(--accent)' : 'var(--border-color)',
+                        cursor: 'pointer', position: 'relative', transition: 'background 0.2s', flexShrink: 0
+                      }}
+                    >
+                      <div style={{
+                        width: 18, height: 18, borderRadius: '50%', background: '#fff',
+                        position: 'absolute', top: 3, left: aiSettings?.typing_indicator ? 23 : 3,
+                        transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.3)'
+                      }} />
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 11, color: aiSettings?.typing_indicator ? 'var(--success)' : 'var(--text-tertiary)', marginTop: 6, fontWeight: 600 }}>
+                    {aiSettings?.typing_indicator ? '🟢 Typing indicator active (Shows "typing..." to customer)' : '⚪ Typing indicator off (Replies sent without typing status)'}
+                  </div>
+                </div>
+
                 {/* Auto Handover */}
                 <div className="card">
                   <div className="card-header">Auto Handover to Human</div>
